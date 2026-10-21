@@ -1,0 +1,176 @@
+/*
+ * The CRT look shared by the game and the DOM UI. CrtScreen (crt.ts) sets data-crt on the root element, puts
+ * .crt-ui on the UI root and sets its filter (glow and blur) from script. This sheet draws the screen
+ * layer over everything and the phosphor text.
+ */
+
+.crt-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.crt-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: none;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.crt-screen > * {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+}
+
+:root[data-crt='full'] .crt-screen,
+:root[data-crt='soft'] .crt-screen,
+:root[data-crt='full'] .crt-screen > *,
+:root[data-crt='soft'] .crt-tube {
+  display: block;
+}
+
+/* Scanlines, aperture grille, vignette and rounded corners, painted by CrtScreen. */
+.crt-tube {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* One tile of slack on two sides, so jumping by up to a tile always covers the screen. */
+.crt-noise {
+  left: -128px;
+  top: -128px;
+  width: calc(100% + 128px);
+  height: calc(100% + 128px);
+  opacity: 0.055;
+  animation: crt-grain 0.48s steps(1, end) infinite;
+}
+
+.crt-band {
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 25%;
+  background: linear-gradient(
+    180deg,
+    rgba(232, 232, 227, 0) 0%,
+    rgba(232, 232, 227, 0.022) 40%,
+    rgba(232, 232, 227, 0.045) 55%,
+    rgba(232, 232, 227, 0) 100%
+  );
+  animation: crt-roll 9s linear infinite;
+}
+
+.crt-flicker {
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  animation: crt-flicker 3.7s steps(1, end) infinite;
+}
+
+@keyframes crt-grain {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  12.5% {
+    transform: translate3d(71px, 19px, 0);
+  }
+  25% {
+    transform: translate3d(23px, 97px, 0);
+  }
+  37.5% {
+    transform: translate3d(113px, 52px, 0);
+  }
+  50% {
+    transform: translate3d(41px, 121px, 0);
+  }
+  62.5% {
+    transform: translate3d(89px, 7px, 0);
+  }
+  75% {
+    transform: translate3d(5px, 66px, 0);
+  }
+  87.5% {
+    transform: translate3d(127px, 103px, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* The band is a quarter of the screen tall, so 400% of its own height carries it off the bottom. */
+@keyframes crt-roll {
+  from {
+    transform: translate3d(0, -100%, 0);
+  }
+  to {
+    transform: translate3d(0, 400%, 0);
+  }
+}
+
+@keyframes crt-flicker {
+  0% {
+    opacity: 0.02;
+  }
+  6% {
+    opacity: 0;
+  }
+  21% {
+    opacity: 0.035;
+  }
+  23% {
+    opacity: 0.01;
+  }
+  47% {
+    opacity: 0.025;
+  }
+  48% {
+    opacity: 0;
+  }
+  71% {
+    opacity: 0.045;
+  }
+  72% {
+    opacity: 0.015;
+  }
+  90% {
+    opacity: 0.03;
+  }
+}
+
+/*
+ * Phosphor text: a red and blue fringe either side and a glow in the text's own colour. Zero specificity, so any
+ * text-shadow the UI sets itself wins.
+ */
+:where(:root[data-crt='full'], :root[data-crt='soft']) :where(.crt-ui, .crt-ui *) {
+  text-shadow:
+    -0.6px 0 rgba(255, 64, 64, 0.3),
+    0.6px 0 rgba(64, 176, 255, 0.3),
+    0 0 5px rgba(232, 232, 227, 0.35);
+}
+
+@supports (color: color-mix(in srgb, red 50%, blue)) {
+  :where(:root[data-crt='full'], :root[data-crt='soft']) :where(.crt-ui, .crt-ui *) {
+    text-shadow:
+      -0.6px 0 rgba(255, 64, 64, 0.3),
+      0.6px 0 rgba(64, 176, 255, 0.3),
+      0 0 5px color-mix(in srgb, currentColor 45%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-crt] .crt-band,
+  :root[data-crt] .crt-flicker {
+    display: none;
+  }
+
+  .crt-noise {
+    animation: none;
+  }
+}

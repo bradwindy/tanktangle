@@ -56,6 +56,14 @@ export type AnyEvent = GameEvent | LocalEvent;
 
 export type CameraMode = 'fit' | 'follow';
 
+/**
+ * full: every effect, with line wobble, sync jitter, phosphor trails, grain, flicker and the rolling band. soft:
+ * scanlines, mask, glow and aberration, steady. off: none, only the game's normal bloom.
+ * The game's post pass (Renderer.setCrt) and the DOM layer (CrtScreen in crt.ts) must agree for each level.
+ */
+export type CrtLevel = 'off' | 'soft' | 'full';
+export const CRT_LEVELS: readonly CrtLevel[] = ['full', 'soft', 'off'];
+
 export interface ScreenRect {
   x: number;
   y: number;
@@ -77,7 +85,7 @@ export interface Renderer {
   setViewport(rect: ScreenRect): void;
   /** CSS px per world px if the whole maze were fitted into the current viewport. */
   fitScale(maze: { w: number; h: number }): number;
-  setCrt(on: boolean): void;
+  setCrt(level: CrtLevel): void;
   draw(view: ViewState, dt: number): void;
   drawMinimap(canvas: HTMLCanvasElement, view: ViewState): void;
   worldToScreen(x: number, y: number): { x: number; y: number };

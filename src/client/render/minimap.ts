@@ -2,7 +2,7 @@ import { TILE } from '../../shared/constants';
 import { isSolid, wallCount, wallRect } from '../../shared/grid';
 import { WallKind, type MazeState } from '../../shared/types';
 import type { ViewState } from '../view';
-import { KIND_COLOR, mix } from './palette';
+import { BRICK, FLOOR, INK, KIND_COLOR, mix, rgba, STEEL, VOID } from './palette';
 import { ctx2d, makeCanvas } from './pixels';
 
 const BORDER = 3;
@@ -40,9 +40,9 @@ export class Minimap {
     const sy = (y: number) => oy + y * scale;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, bw, bh);
-    ctx.fillStyle = 'rgba(8,7,13,0.82)';
+    ctx.fillStyle = rgba(VOID, 0.82);
     ctx.fillRect(0, 0, bw, bh);
-    ctx.fillStyle = '#1c1930';
+    ctx.fillStyle = FLOOR.base;
     ctx.fillRect(ox, oy, Math.round(ww * scale), Math.round(wh * scale));
     const key = `${bw}x${bh}`;
     if (this.dirty || this.wallsFor !== m || this.wallsSize !== key || !this.walls) {
@@ -79,7 +79,7 @@ export class Minimap {
       const x = Math.round(sx(t.x));
       const y = Math.round(sy(t.y));
       const size = t.isMe ? tankDot + 2 : tankDot;
-      ctx.fillStyle = '#0b0a12';
+      ctx.fillStyle = INK;
       ctx.fillRect(x - size / 2 - 1, y - size / 2 - 1, size + 2, size + 2);
       ctx.fillStyle = t.isMe ? mix(t.color, '#ffffff', 0.35) : t.color;
       ctx.fillRect(x - size / 2, y - size / 2, size, size);
@@ -107,7 +107,7 @@ function renderWalls(m: MazeState, bw: number, bh: number, scale: number, ox: nu
   const n = wallCount(m.w, m.h);
   const minW = Math.max(1, Math.round(dpr));
   for (const pass of [WallKind.Brick, WallKind.Steel]) {
-    ctx.fillStyle = pass === WallKind.Steel ? '#8592b2' : '#c4603a';
+    ctx.fillStyle = pass === WallKind.Steel ? STEEL.light : BRICK.hi;
     for (let id = 0; id < n; id++) {
       if (m.walls[id] !== pass || !isSolid(m, id)) continue;
       const r = wallRect(m, id);

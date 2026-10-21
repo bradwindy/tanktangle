@@ -1,19 +1,21 @@
 import { TILE } from '../../shared/constants';
 import { Ev } from '../../shared/protocol';
 import type { MazeState, Rect } from '../../shared/types';
-import type { AnyEvent, CameraMode, Renderer, ScreenRect, ViewState } from '../view';
+import type { AnyEvent, CameraMode, CrtLevel, Renderer, ScreenRect, ViewState } from '../view';
 import { cameraView, clampAxis, damp, FIT_MARGIN, fitScale, followScale, toScreen, type CameraView, type ViewRect } from './camera';
 import { CrateLayer } from './crates';
 import { watchPixelRatio } from './dpr';
 import { Effects } from './effects';
 import { EventFx, type FxContext } from './events';
+import { hsyncJitter } from './jitter';
 import { Minimap } from './minimap';
-import { Overlay } from './overlay';
+import { HEADING_FONT, Overlay, TAG_FONT } from './overlay';
 import { mix, VOID } from './palette';
 import { Particles } from './particles';
 import { ctx2d, makeCanvas } from './pixels';
 import { createPresenter, type Presenter } from './post';
 import { ProjectileLayer } from './projectiles';
+import { SpawnCue } from './spawncue';
 import { dottedPath } from './raster';
 import { SpriteBank } from './sprites';
 import { StormLayer } from './storm';
@@ -37,7 +39,6 @@ export interface RendererStats {
   scale: number;
 }
 
-const BLOOM = 0.9;
 /** Keeps the low-res scene canvas a sane size even if the arena is squeezed into a tiny viewport. */
 const MIN_SCALE = 0.35;
 
@@ -56,10 +57,11 @@ class PixelRenderer implements Renderer {
   private storm: StormLayer;
   private events: EventFx;
   private minimap = new Minimap();
+  private cue = new SpawnCue();
   private maze: MazeState | null = null;
   private mode: CameraMode = 'fit';
   private viewport: ScreenRect | null = null;
-  private crt = true;
+  private crt: CrtLevel = 'full';
   private cssW = 1;
   private cssH = 1;
   private dpr = 1;
@@ -81,6 +83,8 @@ class PixelRenderer implements Renderer {
     this.presenter = createPresenter(stage, options.webgl !== false);
     this.stats.presenter = this.presenter.kind;
     this.overlay = new Overlay(overlayCanvas);
+    if (this.presenter.kind === 'webgl') overlayCanvas.style.visibility = 'hidden';
+    if (typeof document !== 'undefined') document.documentElement.dataset.presenter = this.presenter.kind;
     this.events = new EventFx(this.particles);
     this.world = new World(this.sprites, { regrowStep: (x, y) => this.events.regrowStep(x, y) });
     this.tanks = new TankLayer(this.sprites, this.world, this.particles, this.fx);
@@ -110,6 +114,9 @@ class PixelRenderer implements Renderer {
     }
     const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
     if (fonts) {
+      // Canvas text alone never makes the browser fetch a web font weight.
+      fonts.load(HEADING_FONT(16)).catch(() => undefined);
+      fonts.load(TAG_FONT(16)).catch(() => undefined);
       void fonts.ready.then(() => this.overlay.invalidateText());
       fonts.addEventListener?.('loadingdone', () => this.overlay.invalidateText());
     }
@@ -124,6 +131,8 @@ class PixelRenderer implements Renderer {
     this.particles.clear();
     this.fx.clear();
     this.minimap.invalidate();
+    this.cue.reset();
+    this.presenter.clearTrails?.();
     this.camReady = false;
   }
 
@@ -137,6 +146,7 @@ class PixelRenderer implements Renderer {
     try {
       if (view.maze !== this.maze) this.setMaze(view.maze);
       if (ev.e === Ev.Brick) this.wallChanged(ev.wall);
+      if (ev.e === Ev.Spawn && ev.seat === view.me && view.me >= 0) this.cue.spawned(this.time);
       this.events.handle(ev, view, this.fxContext(view));
     } catch (err) {
       this.logOnce('render_event_failed', err);
@@ -187,8 +197,9 @@ class PixelRenderer implements Renderer {
     return fitScale(maze.w * TILE, maze.h * TILE, this.viewRect());
   }
 
-  setCrt(on: boolean): void {
-    this.crt = on;
+  setCrt(level: CrtLevel): void {
+    this.crt = level;
+    this.overlay.setGlow(level !== 'off');
   }
 
   worldToScreen(x: number, y: number): { x: number; y: number } {
@@ -273,6 +284,8 @@ class PixelRenderer implements Renderer {
     this.world.update(dt, now);
     this.particles.update(dt, (x, y, color) => this.world.speck(x, y, color));
     this.overlay.update(dt);
+    this.cue.update(view, now);
+    const cue = this.cue.strength(now);
 
     const cam = this.cam;
     const sceneW = Math.ceil(this.cssW / cam.scale) + 2;
@@ -295,7 +308,7 @@ class PixelRenderer implements Renderer {
     this.crates.draw(ctx, view.crates, now);
     const meTank = view.tanks.find((t) => t.seat === view.me);
     this.projs.drawMines(ctx, view.projectiles, view.me, meTank?.team ?? 0, view.tick, now);
-    this.tanks.draw(ctx, view.tanks, view.tick, now);
+    this.tanks.draw(ctx, view.tanks, view.tick, now, cue);
     this.projs.drawFlying(ctx, view.projectiles, view.tick, now);
     this.fx.draw(ctx, now);
     this.particles.draw(ctx);
@@ -305,22 +318,32 @@ class PixelRenderer implements Renderer {
     }
     this.drawAims(ctx, view, meTank?.color ?? '#ffffff', now);
 
+    const drewOverlay = this.overlay.draw(view, cam, this.viewRect(), view.phase !== 'attract', { strength: cue, age: this.cue.age(now), bounce: this.motion });
     const s = this.fx.screen;
-    this.presenter.present(this.scene, {
-      srcX: cam.left - ox,
-      srcY: cam.top - oy,
-      srcW: this.cssW / cam.scale,
-      srcH: this.cssH / cam.scale,
-      scale: cam.scale * this.dpr,
-      crt: this.crt,
-      bloom: BLOOM,
-      flash: s.flash,
-      flashColor: s.flashColor,
-      hurt: s.hurt,
-      aberration: s.aberration,
-      time: now,
-    });
-    this.overlay.draw(view, cam, this.viewRect(), view.phase !== 'attract');
+    const steady = this.motion < 1;
+    this.presenter.present(
+      this.scene,
+      {
+        srcX: cam.left - ox,
+        srcY: cam.top - oy,
+        srcW: this.cssW / cam.scale,
+        srcH: this.cssH / cam.scale,
+        scale: cam.scale * this.dpr,
+        originX: ox,
+        originY: oy,
+        dpr: this.dpr,
+        dt,
+        crt: this.crt,
+        motion: !steady,
+        jitter: this.crt === 'full' && !steady ? hsyncJitter(performance.now() / 1000) : 0,
+        flash: s.flash,
+        flashColor: s.flashColor,
+        hurt: s.hurt,
+        aberration: s.aberration,
+        time: now,
+      },
+      drewOverlay ? this.overlay.canvas : null,
+    );
     this.stats.sceneW = sceneW;
     this.stats.sceneH = sceneH;
     this.stats.scale = cam.scale;

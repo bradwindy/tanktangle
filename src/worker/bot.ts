@@ -51,12 +51,21 @@ interface Skill {
   careful: boolean;
   /** Whose mines it routes around: its own, its team's too, or every mine it can spot. */
   mines: 'own' | 'team' | 'all';
+  /** Straight-line distance (px) within which it shoots at enemies. */
+  reach: number;
+  /** Fewest ticks between its shots. */
+  shotGap: number;
+  /** Share of the time it drifts about the maze instead of hunting. */
+  roam: number;
 }
 
+const NO_LIMITS = { reach: Infinity, shotGap: 0, roam: 0 };
+
 export const BOT_SKILL: Record<BotLevel, Skill> = {
-  easy: { plan: 15, aimError: 0.1, hitMargin: 13, bankDepth: 0, fan: 0, lead: 0, trigger: 0.4, dodge: 0.1, crateRange: 4, weighCrates: false, careful: false, mines: 'own' },
-  normal: { plan: 9, aimError: 0.035, hitMargin: 9, bankDepth: 1, fan: 0, lead: 0.6, trigger: 0.8, dodge: 0.5, crateRange: 6, weighCrates: false, careful: true, mines: 'team' },
-  hard: { plan: 6, aimError: 0.012, hitMargin: 8, bankDepth: 2, fan: 64, lead: 1, trigger: 1, dodge: 0.9, crateRange: 8, weighCrates: true, careful: true, mines: 'all' },
+  easy: { plan: 24, aimError: 0.26, hitMargin: 18, bankDepth: 0, fan: 0, lead: 0, trigger: 0.25, dodge: 0, crateRange: 3, weighCrates: false, careful: false, mines: 'own', reach: 5 * TILE, shotGap: 2 * TICK_HZ, roam: 0.3 },
+  normal: { plan: 15, aimError: 0.1, hitMargin: 13, bankDepth: 0, fan: 0, lead: 0, trigger: 0.4, dodge: 0.1, crateRange: 4, weighCrates: false, careful: false, mines: 'own', ...NO_LIMITS },
+  hard: { plan: 9, aimError: 0.035, hitMargin: 9, bankDepth: 1, fan: 0, lead: 0.6, trigger: 0.8, dodge: 0.5, crateRange: 6, weighCrates: false, careful: true, mines: 'team', ...NO_LIMITS },
+  expert: { plan: 6, aimError: 0.012, hitMargin: 8, bankDepth: 2, fan: 64, lead: 1, trigger: 1, dodge: 0.9, crateRange: 8, weighCrates: true, careful: true, mines: 'all', ...NO_LIMITS },
 };
 
 /** A point a shot path must reach (enemy) or must not reach first (the bot itself, teammates, shields). */
@@ -129,6 +138,8 @@ const RC_RUN = 0.6 * TILE;
 const SHRAPNEL_REACH = 90;
 const MINE_CHASE_CELLS = 4;
 const STORM_LOOKAHEAD = 4 * TICK_HZ;
+/** A roaming bot decides this often whether to roam or hunt. */
+const ROAM_TICKS = 3 * TICK_HZ;
 const WEAPON_VALUE: Record<Exclude<Weapon, 0>, number> = {
   [Weapon.Laser]: 9,
   [Weapon.Gatling]: 7,
@@ -238,6 +249,8 @@ export class Bot {
   private progressAt = 0;
   private skipAimUntil = 0;
   private wanderTo = -1;
+  private roaming = false;
+  private roamUntil = 0;
 
   constructor(
     readonly seat: number,
@@ -358,7 +371,7 @@ export class Bot {
 
     const immune = t.shieldUntil > k || t.protectUntil > k;
     let dodging = false;
-    if (this.skill.dodge > 0 && !(immune && this.level === 'hard')) {
+    if (this.skill.dodge > 0 && !(immune && this.level === 'expert')) {
       const threat = this.threat(w, t);
       if (threat && this.rng() < this.skill.dodge) dodging = this.dodge(w, t, threat);
     }
@@ -447,15 +460,20 @@ export class Bot {
   // Shooting
 
   /** Decides whether to fire this plan. Returns the heading to turn to or hold for a shot, or null to keep moving. */
-  private shoot(w: BotWorld, t: TankState, enemies: readonly TankState[]): number | null {
+  private shoot(w: BotWorld, t: TankState, alive: readonly TankState[]): number | null {
     const k = w.k;
     if (k < t.frozenUntil) return null;
-    // A hard bot uses its spawn protection to get moving, and only shoots once it is about to run out anyway.
-    if (this.level === 'hard' && t.protectUntil > k + this.skill.plan) return null;
+    // An expert bot uses its spawn protection to get moving, and only shoots once it is about to run out anyway.
+    if (this.level === 'expert' && t.protectUntil > k + this.skill.plan) return null;
+    // The gap paces single shots only, and the bot keeps lining up through it. Held and multi-press weapons
+    // (Gatling, mines, missiles, death ray) would stall under it.
+    const resting = k - w.shotAt(this.seat) < this.skill.shotGap;
+    const single = (shot: { now: boolean; aim: number } | null) => (resting ? (shot?.aim ?? null) : this.take(shot, k));
+    const enemies = alive.filter((e) => dist(t, e) <= this.skill.reach);
     switch (t.weapon) {
       case Weapon.Gun:
       case Weapon.Frag:
-        return this.take(this.lineUp(w, t, enemies, t.weapon === Weapon.Gun ? Proj.Bullet : Proj.Frag), k);
+        return single(this.lineUp(w, t, enemies, t.weapon === Weapon.Gun ? Proj.Bullet : Proj.Frag));
       case Weapon.Gatling: {
         const shot = this.lineUp(w, t, enemies, Proj.Gatling);
         // Spin up while lining up, so the barrel is turning when the shot opens, and keep the heading while it fires.
@@ -463,9 +481,9 @@ export class Bot {
         return shot?.aim ?? null;
       }
       case Weapon.Shotgun:
-        return this.take(this.lineUp(w, t, enemies.filter((e) => dist(t, e) < SHOTGUN_RANGE), Proj.Pellet), k);
+        return single(this.lineUp(w, t, enemies.filter((e) => dist(t, e) < SHOTGUN_RANGE), Proj.Pellet));
       case Weapon.Laser:
-        return this.take(this.lineUp(w, t, enemies, null), k);
+        return single(this.lineUp(w, t, enemies, null));
       case Weapon.Homing:
       case Weapon.Rc:
         return this.launchMissile(w, t, enemies);
@@ -487,7 +505,7 @@ export class Bot {
 
   /**
    * Looks for a shot with a projectile kind (null for the laser): whether the current heading already hits,
-   * and otherwise the best angle to turn to (direct, banked off one wall, or for hard bots a two-bounce search).
+   * and otherwise the best angle to turn to (direct, banked off one wall, or for expert bots a two-bounce search).
    */
   private lineUp(w: BotWorld, t: TankState, enemies: readonly TankState[], kind: Proj | null): { now: boolean; aim: number } | null {
     const m = w.maze;
@@ -817,7 +835,7 @@ export class Bot {
     this.move = { kind: 'drive', x: next.x, y: next.y };
   }
 
-  /** Where to go: out of the storm, away from a fight at 1 hp, to a crate, to the nearest enemy, or anywhere. */
+  /** Where to go: out of the storm, away from a fight at 1 hp, to a crate, to the nearest enemy unless roaming, or anywhere. */
   private goal(w: BotWorld, t: TankState, enemies: readonly TankState[]): { cell: number; at: Point } | null {
     const k = w.k;
     const m = w.maze;
@@ -871,12 +889,21 @@ export class Bot {
         target = e;
       }
     }
-    if (target) return { cell: cellIndex(m, target.x, target.y), at: { x: target.x, y: target.y } };
+    if (target && !this.roams(k)) return { cell: cellIndex(m, target.x, target.y), at: { x: target.x, y: target.y } };
 
     if (this.wanderTo < 0 || this.wanderTo === cellIndex(m, t.x, t.y) || !reachable(this.wanderTo)) {
       this.wanderTo = pick(() => this.rng());
     }
     return this.wanderTo >= 0 ? atCell(this.wanderTo) : null;
+  }
+
+  private roams(k: number): boolean {
+    if (this.skill.roam === 0) return false;
+    if (k >= this.roamUntil) {
+      this.roaming = this.rng() < this.skill.roam;
+      this.roamUntil = k + ROAM_TICKS;
+    }
+    return this.roaming;
   }
 
   private bestCrate(w: BotWorld, t: TankState): Crate | null {

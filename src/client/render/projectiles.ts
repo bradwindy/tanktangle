@@ -1,7 +1,7 @@
 import { MINES } from '../../shared/weapons';
 import { Proj, sameTeam } from '../../shared/types';
 import type { ViewProj } from '../view';
-import { FIRE, mix, SMOKE, tankRamp } from './palette';
+import { FIRE, GUNMETAL, INK, mix, SMOKE, tankRamp } from './palette';
 import { Kind, type Particles, type Ramp } from './particles';
 import { checker, circlePath, ringPath } from './raster';
 import { ROCKET_ROTATIONS, ROCKET_SIZE, rotationIndex, type SpriteBank } from './sprites';
@@ -201,7 +201,7 @@ export class ProjectileLayer {
         const rate = left < 60 ? 14 : left < 150 ? 7 : 3.5;
         const blink = Math.floor(now * rate) % 2 === 0;
         const r = blink ? 3.5 : 3;
-        ctx.fillStyle = '#1a1726';
+        ctx.fillStyle = INK;
         ctx.beginPath();
         circlePath(ctx, x, y, r + 1);
         ctx.fill();
@@ -235,17 +235,17 @@ export class ProjectileLayer {
     }
     const x = Math.round(p.x);
     const y = Math.round(p.y);
-    ctx.fillStyle = '#0b0a12';
+    ctx.fillStyle = INK;
     ctx.beginPath();
     circlePath(ctx, x, y, 4.5);
     ctx.rect(x - 1, y - 6, 2, 12);
     ctx.rect(x - 6, y - 1, 12, 2);
     ctx.fill();
-    ctx.fillStyle = '#3a3f52';
+    ctx.fillStyle = GUNMETAL.dark;
     ctx.beginPath();
     circlePath(ctx, x, y, 3.5);
     ctx.fill();
-    ctx.fillStyle = '#6c7690';
+    ctx.fillStyle = GUNMETAL.mid;
     ctx.fillRect(x - 1, y - 5, 2, 2);
     ctx.fillRect(x - 1, y + 3, 2, 2);
     ctx.fillRect(x - 5, y - 1, 2, 2);
@@ -259,7 +259,7 @@ export class ProjectileLayer {
       const pulse = (tick - armedAt) % 60 < 8;
       light = pulse ? mix(p.color, '#ffffff', 0.5) : tankRamp(p.color).base;
     } else {
-      light = '#52586a';
+      light = '#575757';
     }
     ctx.fillStyle = light;
     ctx.fillRect(x - 1, y - 1, 2, 2);

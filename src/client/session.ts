@@ -1,7 +1,7 @@
 import { BRICK_HP, GAME_SPEEDS, HEARTBEAT_MS, RESPAWN_TICKS, SHIELD_RADIUS, SNAPSHOT_TIMEOUT_MS, TICK_HZ } from '../shared/constants';
 import { decodeMaze } from '../shared/grid';
 import { decodeEvent, Ev, tankFlags, type GameEvent, type MatchMsg, type PublicPlayer, type RoomMsg, type ServerMsg, type SnapMsg } from '../shared/protocol';
-import type { Settings } from '../shared/settings';
+import { DEFAULT_SETTINGS, type Settings } from '../shared/settings';
 import { bulletPath, shotOrigin, stormRect, tracePath, type Circle } from '../shared/sim';
 import { Input, sameTeam, TankFlag, Upgrade, WallKind, Weapon, type BotLevel, type Crate, type MazeState, type TankState } from '../shared/types';
 import { LASER } from '../shared/weapons';
@@ -47,6 +47,8 @@ export interface SessionDeps {
   sfx: Sfx;
   controls: Controls;
   pid: string;
+  /** The remembered PALETTE pick, asked for on joining. */
+  color?: number;
   hooks: SessionHooks;
 }
 
@@ -109,14 +111,16 @@ export class Session {
   private projPool: ViewProj[] = [];
   private pose: Pose = { x: 0, y: 0, a: 0 };
   private view: ViewState | null = null;
+  private colorPick: number | undefined;
 
   constructor(
     readonly code: string,
     name: string,
     private deps: SessionDeps,
   ) {
+    this.colorPick = deps.color;
     this.net = new Net(code, {
-      hello: () => ({ t: 'hello', pid: deps.pid, name }),
+      hello: () => ({ t: 'hello', pid: deps.pid, name, color: this.colorPick }),
       opened: () => this.resetInputs(),
       message: (msg) => this.onMessage(msg),
       status: (status) => {
@@ -161,6 +165,9 @@ export class Session {
   }
   team(team: number): void {
     this.net.send({ t: 'team', team });
+  }
+  color(color: number): void {
+    this.net.send({ t: 'color', color });
   }
 
   /** The seat of the local player's tank in the current match, or -1 when watching. */
@@ -207,6 +214,9 @@ export class Session {
   private onRoom(msg: RoomMsg): void {
     const prev = this.room;
     this.room = msg;
+    // A rejoin as a new player asks for the colour we actually hold, never a pick the server refused.
+    const mine = msg.players.find((p) => p.id === this.myId);
+    if (mine) this.colorPick = mine.color;
     this.seats.clear();
     const teams = msg.settings.teams > 0;
     for (const p of msg.players) if (p.seat >= 0) this.seats.set(p.seat, { player: p, color: playerColor(p, teams) });
@@ -601,7 +611,7 @@ export class Session {
       for (const t of tanks) if (t !== mine && t.alive && t.shieldUntil > tick) mirrors.push({ x: t.x, y: t.y, r: SHIELD_RADIUS });
       return [tracePath(m.maze, o.x, o.y, mine.a, LASER.maxReflections, LASER.maxLength, mirrors).pts];
     }
-    return [bulletPath(m.maze, mine, this.room?.settings.bounces ?? 6, AIMER_LENGTH, m.pred.opts.speed)];
+    return [bulletPath(m.maze, mine, this.room?.settings.bounces ?? DEFAULT_SETTINGS.bounces, AIMER_LENGTH, m.pred.opts.speed)];
   }
 
   // ---------------------------------------------------------------------------------------------

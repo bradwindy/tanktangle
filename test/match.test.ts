@@ -44,7 +44,7 @@ function makeMatch(opts: { settings?: Partial<Settings>; teams?: number[]; w?: n
   return new Match({
     id: 1,
     settings: { ...DEFAULT_SETTINGS, powerups: 0, ...opts.settings },
-    seats: teams.map((team, seat) => ({ seat, team, id: `p${seat}`, bot: null })),
+    seats: teams.map((team, seat) => ({ seat, team, id: `p${seat}`, bot: null, name: `P${seat}`, color: seat })),
     rng: mulberry32(7),
     maze: maze(opts.w ?? 7, opts.h ?? 3, opts.walls),
   });
@@ -175,6 +175,21 @@ describe('lives mode', () => {
     expect(events(seen, Ev.Death)).toEqual([expect.objectContaining({ seat: 1, by: 0, self: false })]);
     expect(m.result).toMatchObject({ draw: false, winners: ['p0'], team: 0, standings: ['p0', 'p1'] });
     expect(m.seats[1]!.score).toMatchObject({ lives: 0, out: true, deaths: 1 });
+  });
+
+  it('fills a stats board row for every seat in standings order', () => {
+    const m = makeMatch({ settings: { lives: 1 } });
+    start(m, [
+      [1, 1, RIGHT],
+      [4, 1, LEFT],
+    ]);
+    m.tanks[1]!.hp = 1;
+    tap(m, 0);
+    runUntil(m, () => m.over, 1000);
+    expect(m.result!.stats).toEqual([
+      expect.objectContaining({ id: 'p0', name: 'P0', color: 0, kills: 1, deaths: 0, shots: 1, hits: 1, damage: 1, bestStreak: 1 }),
+      expect.objectContaining({ id: 'p1', name: 'P1', color: 1, kills: 0, deaths: 1, shots: 0, hits: 0, damage: 0, bestStreak: 0 }),
+    ]);
   });
 
   it('respawns after the delay with spawn protection that shots pass through, until the tank fires', () => {

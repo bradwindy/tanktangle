@@ -68,8 +68,8 @@ export const TankFlag = {
 /** Team 0 is free-for-all, so two team-0 tanks are never teammates. */
 export const sameTeam = (a: number, b: number) => a !== 0 && a === b;
 
-export type BotLevel = 'easy' | 'normal' | 'hard';
-export const BOT_LEVELS: readonly BotLevel[] = ['easy', 'normal', 'hard'];
+export type BotLevel = 'easy' | 'normal' | 'hard' | 'expert';
+export const BOT_LEVELS: readonly BotLevel[] = ['easy', 'normal', 'hard', 'expert'];
 
 /**
  * The maze grid. Walls sit on cell edges and are indexed by wall id:

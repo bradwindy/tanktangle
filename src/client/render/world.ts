@@ -52,10 +52,10 @@ const P = {
   brickCrack: packRgba(BRICK.crack),
   rubble: packRgba(BRICK.rubble),
   rubbleLight: packRgba(BRICK.dark),
-  ledCyan: packRgba('#7ff6ff'),
-  ledRed: packRgba('#ff5a6a'),
-  sootBase: packRgba('#8e3f28'),
-  sootLight: packRgba('#a8573a'),
+  ledWhite: packRgba('#f4f4f4'),
+  ledDim: packRgba('#9a9a9a'),
+  sootBase: packRgba('#553628'),
+  sootLight: packRgba('#664333'),
 };
 
 interface Regrow {
@@ -207,7 +207,7 @@ export class World {
     const ctx = this.decalCtx;
     const c = Math.cos(a);
     const s = Math.sin(a);
-    ctx.fillStyle = 'rgba(6,5,12,0.26)';
+    ctx.fillStyle = 'rgba(0,0,0,0.26)';
     for (const side of [-5, 5]) {
       const px = Math.round(x - c * 6 - s * side) + PAD;
       const py = Math.round(y - s * 6 + c * side) + PAD;
@@ -438,7 +438,7 @@ function steelPixel(wx: number, wy: number, top: boolean, bottom: boolean): numb
     const py = (((wy + WALL / 2) % TILE) + TILE) % TILE;
     if (px === 2 && py === 2) {
       const led = hash2(Math.floor((wx + WALL / 2) / TILE), Math.floor((wy + WALL / 2) / TILE), 31);
-      return led < 0.18 ? P.ledCyan : led < 0.26 ? P.ledRed : P.steelRivet;
+      return led < 0.18 ? P.ledWhite : led < 0.26 ? P.ledDim : P.steelRivet;
     }
     if (px === 3 && py === 3) return P.steelSeam;
     if (top) return P.steelHi;
@@ -502,14 +502,15 @@ function buildFloor(m: MazeState, lw: number, lh: number): HTMLCanvasElement {
   return canvas;
 }
 
-const LAMP_COLORS = ['#3fd9c0', '#c04dff', '#ff9a3d', '#4da6ff', '#ff4d8a'].map(hexToRgb);
+const LAMP = hexToRgb('#e6e6e6');
+const LAMP_STRENGTH = 0.05;
 
-/** Soft pools of coloured light baked into the floor, in dithered steps so they stay pixel art. */
+/** Soft pools of plain light baked into the floor, in dithered steps so they stay pixel art. */
 function lightFloor(buf: Uint32Array, lw: number, lh: number, m: MazeState, seed: number): void {
+  const [lr, lg, lb] = LAMP;
   for (let cy = 0; cy < m.h; cy++) {
     for (let cx = 0; cx < m.w; cx++) {
       if (hash2(cx, cy, seed + 21) > 0.16) continue;
-      const [lr, lg, lb] = LAMP_COLORS[Math.floor(hash2(cx, cy, seed + 22) * LAMP_COLORS.length)]!;
       const r = 40 + hash2(cx, cy, seed + 23) * 34;
       const ox = PAD + cx * TILE + TILE / 2;
       const oy = PAD + cy * TILE + TILE / 2;
@@ -524,7 +525,7 @@ function lightFloor(buf: Uint32Array, lw: number, lh: number, m: MazeState, seed
           const f = (1 - d) * (1 - d);
           const step = Math.floor(f * 3 + (BAYER[(y & 3) * 4 + (x & 3)]! + 0.5) / 16);
           if (step <= 0) continue;
-          const k = step * 0.075;
+          const k = step * LAMP_STRENGTH;
           const i = y * lw + x;
           const v = buf[i]!;
           const pr = v & 255;
@@ -585,8 +586,8 @@ function buildScorch(r: number): HTMLCanvasElement {
   const ctx = ctx2d(c);
   const img = ctx.createImageData(size, size);
   const buf = new Uint32Array(img.data.buffer);
-  const dark = packRgba('#050407', 150);
-  const mid = packRgba('#0c0a0f', 95);
+  const dark = packRgba('#050505', 150);
+  const mid = packRgba('#0c0c0c', 95);
   const ember = packRgba('#3a1d14', 120);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {

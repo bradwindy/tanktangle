@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { CLOSE, MAX_CONNECTIONS, MAX_MESSAGE_BYTES, RATE_LIMIT_PER_SEC, TICK_HZ } from '../shared/constants';
+import { CLOSE, isPaletteIndex, MAX_CONNECTIONS, MAX_MESSAGE_BYTES, RATE_LIMIT_PER_SEC, TICK_HZ } from '../shared/constants';
 import { sanitizeName, type ClientMsg, type ServerMsg } from '../shared/protocol';
 import { Lobby, type LobbySnapshot } from './lobby';
 
@@ -139,7 +139,7 @@ export class Arena extends DurableObject<Env> {
       ws.serializeAttachment({ pid: msg.pid } satisfies Attachment);
       this.sockets.set(msg.pid, ws);
       if (previous && previous !== ws) this.closeQuietly(previous, CLOSE.replaced, 'Opened in another tab');
-      this.lobby.join(msg.pid, sanitizeName(msg.name) || 'Player');
+      this.lobby.join(msg.pid, sanitizeName(msg.name) || 'Player', isPaletteIndex(msg.color) ? msg.color : undefined);
       await this.afterChange();
       return;
     }
@@ -167,6 +167,10 @@ export class Arena extends DurableObject<Env> {
         break;
       case 'team':
         this.lobby.setTeam(pid, msg.team);
+        break;
+      case 'color':
+        if (!isPaletteIndex(msg.color)) return;
+        this.lobby.pickColor(pid, msg.color);
         break;
       default:
         return;

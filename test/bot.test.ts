@@ -3,7 +3,7 @@ import { TICK_HZ } from '../src/shared/constants';
 import { decodeEvent, Ev, type GameEvent } from '../src/shared/protocol';
 import { mulberry32 } from '../src/shared/rng';
 import { DEFAULT_SETTINGS, type Settings } from '../src/shared/settings';
-import { Input, Weapon, type BotLevel } from '../src/shared/types';
+import { BOT_LEVELS, Input, Weapon, type BotLevel } from '../src/shared/types';
 import { WEAPON_AMMO } from '../src/shared/weapons';
 import { Match } from '../src/worker/match';
 
@@ -23,7 +23,7 @@ function play(levels: BotLevel[], seed: number, settings: Partial<Settings>, max
   const m = new Match({
     id: 1,
     settings: { ...DEFAULT_SETTINGS, ...settings },
-    seats: levels.map((bot, seat) => ({ seat, team: teams ? (seat % teams) + 1 : 0, id: `b${seat}`, bot })),
+    seats: levels.map((bot, seat) => ({ seat, team: teams ? (seat % teams) + 1 : 0, id: `b${seat}`, bot, name: `Bot ${seat}`, color: seat })),
     rng: mulberry32(seed),
   });
   const events: GameEvent[] = [];
@@ -57,7 +57,7 @@ function play(levels: BotLevel[], seed: number, settings: Partial<Settings>, max
 const MINUTE = 60 * TICK_HZ;
 
 describe('bots-only matches', () => {
-  it.each(['easy', 'normal', 'hard'] as const)(
+  it.each(['normal', 'hard', 'expert'] as const)(
     '%s bots find each other in the maze, fight a lives match to the end and pick up crates',
     (level) => {
       for (const seed of [1, 2]) {
@@ -74,7 +74,7 @@ describe('bots-only matches', () => {
   );
 
   it('bots on teams finish a timed match, scoring kills for their team', () => {
-    const { m, deaths } = play(['easy', 'normal', 'hard', 'easy', 'normal', 'hard'], 3, { mode: 'timed', minutes: 2, teams: 2 }, 3 * MINUTE);
+    const { m, deaths } = play(['normal', 'hard', 'expert', 'normal', 'hard', 'expert'], 3, { mode: 'timed', minutes: 2, teams: 2 }, 3 * MINUTE);
     expect(m.over).toBe(true);
     const enemyKills = deaths.filter((d) => d.by >= 0 && m.tanks[d.by]!.team !== m.tanks[d.seat]!.team).length;
     expect(enemyKills).toBeGreaterThan(10);
@@ -82,39 +82,52 @@ describe('bots-only matches', () => {
   }, 60000);
 
   it('bots of every level hunt down and kill a player who never moves', () => {
-    // Easy seed 2 used to turn back and forth for good between a shot and its route, never moving or firing.
-    for (const level of ['easy', 'normal', 'hard'] as const) {
+    // Hard (then called normal) seed 2 used to turn back and forth for good between a shot and its route, never moving
+    // or firing. Easy wanders and waits between shots by design, so it gets longer.
+    for (const level of BOT_LEVELS) {
+      const limit = level === 'easy' ? 2 * MINUTE : MINUTE;
       for (let seed = 1; seed <= 30; seed++) {
         const m = new Match({
           id: 1,
           settings: { ...DEFAULT_SETTINGS },
           seats: [
-            { seat: 0, team: 0, id: 'idle', bot: null },
-            { seat: 1, team: 0, id: 'bot', bot: level },
+            { seat: 0, team: 0, id: 'idle', bot: null, name: 'Idle', color: 0 },
+            { seat: 1, team: 0, id: 'bot', bot: level, name: 'Bot', color: 1 },
           ],
           rng: mulberry32(seed),
         });
-        while (m.tanks[0]!.alive && m.k < m.playAt + MINUTE) m.tick();
+        while (m.tanks[0]!.alive && m.k < m.playAt + limit) m.tick();
         expect(m.tanks[0]!.alive, `${level} bot, seed ${seed}`).toBe(false);
       }
     }
   }, 60000);
 
-  it('hard bots beat easy bots by a wide margin', () => {
-    let easy = 0;
-    let hard = 0;
+  it('expert bots beat normal bots by a wide margin', () => {
+    let normal = 0;
+    let expert = 0;
     for (let seed = 10; seed < 16; seed++) {
-      const { m } = play(['easy', 'hard'], seed, { mode: 'timed', minutes: 1, powerups: 0 }, 2 * MINUTE);
-      easy += m.seats[0]!.score.kills;
-      hard += m.seats[1]!.score.kills;
+      const { m } = play(['normal', 'expert'], seed, { mode: 'timed', minutes: 1, powerups: 0 }, 2 * MINUTE);
+      normal += m.seats[0]!.score.kills;
+      expert += m.seats[1]!.score.kills;
     }
-    expect(hard).toBeGreaterThan(easy * 1.8);
+    expect(expert).toBeGreaterThan(normal * 1.8);
+  }, 60000);
+
+  it('normal bots beat the new easy bots by a wide margin', () => {
+    let easy = 0;
+    let normal = 0;
+    for (let seed = 10; seed < 16; seed++) {
+      const { m } = play(['easy', 'normal'], seed, { mode: 'timed', minutes: 1, powerups: 0 }, 2 * MINUTE);
+      easy += m.seats[0]!.score.kills;
+      normal += m.seats[1]!.score.kills;
+    }
+    expect(normal).toBeGreaterThan(easy * 1.8);
   }, 60000);
 
   it.each([Weapon.Laser, Weapon.Gatling, Weapon.Shotgun, Weapon.Homing, Weapon.Frag, Weapon.Mines, Weapon.DeathRay, Weapon.Rc] as const)(
     'bots fire weapon %i and kill with it',
     (weapon) => {
-      const { deaths, events } = play(['normal', 'normal', 'hard', 'hard'], 40 + weapon, { lives: 3, powerups: 0 }, 4 * MINUTE, weapon);
+      const { deaths, events } = play(['hard', 'hard', 'expert', 'expert'], 40 + weapon, { lives: 3, powerups: 0 }, 4 * MINUTE, weapon);
       expect(events.some((e) => e.e === Ev.Fire && e.weapon === weapon)).toBe(true);
       expect(deaths.filter((d) => d.cause === weapon && !d.self).length).toBeGreaterThanOrEqual(3);
     },

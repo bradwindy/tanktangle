@@ -2,7 +2,7 @@ import { RARE_CRATES } from '../../shared/weapons';
 import { Weapon, type CrateKind } from '../../shared/types';
 import { iconMap } from './icons';
 import { ICON_OUTLINED, ICON_PALETTE } from './iconmaps';
-import { INK, mix, packRgba, tankRamp, WHITE } from './palette';
+import { GUNMETAL, INK, mix, packRgba, tankRamp, WHITE } from './palette';
 import {
   blankMap,
   buildAtlas,
@@ -73,9 +73,9 @@ const W = {
 
 const WEAPON_COLORS: Record<number, string> = {
   [O]: INK,
-  [MD]: '#3a3f52',
-  [MM]: '#6c7690',
-  [ML]: '#aeb9cf',
+  [MD]: GUNMETAL.dark,
+  [MM]: GUNMETAL.mid,
+  [ML]: GUNMETAL.light,
   [W.cyanDark]: '#1a7fa8',
   [W.cyan]: '#4fe3ff',
   [W.cyanHot]: '#e6fdff',
@@ -92,7 +92,7 @@ const WEAPON_COLORS: Record<number, string> = {
   [W.green]: '#7fcf45',
   [W.greenHot]: '#d4ff9a',
   [W.hazard]: '#ffd23d',
-  [W.hazardDark]: '#1d1b22',
+  [W.hazardDark]: '#1c1c1c',
   [W.violetDark]: '#5d1f9e',
   [W.violet]: '#c45cff',
   [W.violetHot]: '#ffd6ff',
@@ -366,8 +366,8 @@ const solidLut = (fill: string, outline: string, size: number) => {
 
 function wreckLut(size: number): Uint32Array {
   const out = new Uint32Array(size);
-  const tones = ['#141218', '#221f28', '#2d2932', '#3a3540'];
-  for (let i = 1; i < size; i++) out[i] = packRgba(i === O ? '#0a090d' : tones[i % tones.length]!, 235);
+  const tones = ['#151515', '#222222', '#2d2d2d', '#3a3a3a'];
+  for (let i = 1; i < size; i++) out[i] = packRgba(i === O ? '#0a0a0a' : tones[i % tones.length]!, 235);
   return out;
 }
 
@@ -444,7 +444,7 @@ export class SpriteBank {
     if (!atlas) {
       const ramp = tankRamp(color);
       const table = lut(
-        { 1: INK, 2: '#eef2fa', 3: '#9aa3b8', 4: '#ff7a2a', 5: ramp.light, 6: ramp.dark, 7: '#fff3a0' },
+        { 1: INK, 2: '#f0f0f0', 3: '#a3a3a3', 4: '#ff7a2a', 5: ramp.light, 6: ramp.dark, 7: '#fff3a0' },
         8,
       );
       atlas = buildAtlas(rotations().rockets, ROCKET_CELL, ROCKET_CELL, table);
@@ -465,7 +465,7 @@ export class SpriteBank {
 
 export const ROCKET_SIZE = ROCKET_CELL;
 
-/** 16x16 crate: bevelled frame, dark panel, the kind's icon. Weapons steel, upgrades teal, rare gold. */
+/** 16x16 crate: bevelled frame, dark panel, the kind's icon. Weapons light steel, upgrades teal, rare gold. */
 function buildCrate(kind: CrateKind): HTMLCanvasElement {
   const rare = RARE_CRATES.includes(kind);
   const upgrade = kind >= 9;
@@ -473,7 +473,7 @@ function buildCrate(kind: CrateKind): HTMLCanvasElement {
     ? ['#fff2a0', '#ffd23d', '#b8861a', '#6b4a10']
     : upgrade
       ? ['#b8fff0', '#3fd9c0', '#1f8f86', '#124f52']
-      : ['#e2e8f5', '#9aa6c0', '#5d6884', '#343a50'];
+      : ['#ececec', '#b0b0b0', '#727272', '#3c3c3c'];
   const box = paintMap(CRATE_SIZE, CRATE_SIZE, (x, y) => {
     if (x === 0 || y === 0 || x === CRATE_SIZE - 1 || y === CRATE_SIZE - 1) {
       const corner = (x === 0 || x === CRATE_SIZE - 1) && (y === 0 || y === CRATE_SIZE - 1);

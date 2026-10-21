@@ -1,5 +1,5 @@
-import '@fontsource/press-start-2p';
-import '@fontsource/vt323';
+import '@fontsource/handjet/800.css';
+import '@fontsource/share-tech-mono/400.css';
 import { BRICK_HP, MAX_HP, MUZZLE, PALETTE, SHIELD_RADIUS, TILE, WALL } from '../shared/constants';
 import { cellCenter, emptyMaze, forEachSolidWallNear, hWall, isOuterWall, vWall, wallCount } from '../shared/grid';
 import { Ev, tankFlags, type GameEvent } from '../shared/protocol';
@@ -7,10 +7,11 @@ import { mulberry32, type Rng } from '../shared/rng';
 import { CAUSE_STORM, CRATE_KINDS, Proj, TankFlag, Upgrade, Weapon, WallKind, type Crate, type MazeState, type Rect } from '../shared/types';
 import { BLAST, CRATE_NAMES, DEATH_RAY, MINES, PROJ_STATS } from '../shared/weapons';
 import { createSfx } from './audio';
+import { CrtScreen } from './crt';
 import { createRenderer, weaponIcon } from './render';
 import { iconSprite } from './render/icons';
 import { CELL, ROCKET_SIZE, SpriteBank } from './render/sprites';
-import type { AnyEvent, CameraMode, ViewProj, ViewState, ViewTank } from './view';
+import { CRT_LEVELS, type AnyEvent, type CameraMode, type CrtLevel, type ViewProj, type ViewState, type ViewTank } from './view';
 
 /** Development lab: every sprite, state, event and banner of the renderer, with stress and perf readouts. */
 
@@ -27,22 +28,23 @@ const params = new URLSearchParams(location.search);
 
 const style = document.createElement('style');
 style.textContent = `
-  html, body { margin: 0; height: 100%; background: #08070d; overflow: hidden; color: #e8ecf5; font: 14px VT323, monospace; }
+  html, body { margin: 0; height: 100%; background: #090909; overflow: hidden; color: #ececec; font: 13px 'Share Tech Mono', monospace; }
   #stage, #overlay { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   #overlay { pointer-events: none; }
-  #minimap { position: fixed; top: 10px; left: 10px; width: 120px; height: 80px; border: 2px solid #2a2646; border-radius: 4px; }
-  #lab { position: fixed; top: 8px; right: 8px; bottom: 8px; width: 300px; overflow: auto; background: rgba(12,10,20,0.88);
-    border: 2px solid #2a2646; border-radius: 6px; padding: 8px; box-sizing: border-box; font-size: 16px; }
+  #minimap { position: fixed; top: 10px; left: 10px; width: 120px; height: 80px; border: 2px solid #3a3a3a; border-radius: 4px; }
+  #lab { position: fixed; top: 8px; right: 8px; bottom: 8px; width: 300px; overflow: auto; background: rgba(14,14,14,0.88);
+    border: 2px solid #3a3a3a; border-radius: 6px; padding: 8px; box-sizing: border-box; font-size: 16px; }
   #lab.closed { bottom: auto; width: auto; overflow: hidden; }
   #lab.closed > :not(.head) { display: none; }
-  #lab h3 { font: 10px "Press Start 2P", monospace; margin: 10px 0 4px; color: #ffe14d; }
-  #lab button { font: 15px VT323, monospace; background: #1f1c36; color: #e8ecf5; border: 1px solid #3a3560; border-radius: 3px;
+  #lab h3 { font: 800 16px Handjet, monospace; letter-spacing: 0.08em; margin: 10px 0 4px; color: #ffe14d; }
+  #lab button { font: 12px 'Share Tech Mono', monospace; background: #262626; color: #ececec; border: 1px solid #4a4a4a; border-radius: 3px;
     padding: 2px 6px; margin: 2px; cursor: pointer; }
-  #lab button:hover { background: #2f2a4e; }
-  #lab button.on { background: #3fd9c0; color: #08070d; }
+  #lab button:hover { background: #3a3a3a; }
+  #lab button.on { background: #3fd9c0; color: #090909; }
   #lab .head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-  #lab .stats { font-size: 15px; white-space: pre; color: #a6ff4a; }
-  #lab .icons { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; background: #1c1930; padding: 4px; }
+  #lab .stats { font-size: 12px; white-space: pre; color: #a6ff4a; }
+  #lab .icons { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; background: #2a2a2a; padding: 4px; }
+  #crt-root { position: fixed; inset: 0; pointer-events: none; }
   #magnifier { position: fixed; left: 8px; bottom: 8px; width: 480px; height: 480px; border: 2px solid #ffe14d; display: none;
     image-rendering: pixelated; background: #000; }
 `;
@@ -50,8 +52,14 @@ document.head.append(style);
 
 const renderer = createRenderer(stage, overlay, { webgl: !params.has('nogl') });
 const sfx = createSfx();
-void document.fonts.load('16px "Press Start 2P"');
-void document.fonts.load('16px VT323');
+void document.fonts.load('16px "Share Tech Mono"');
+
+/** The screen layer over the lab. Its filter and jitter go on an empty root, so the panel stays sharp and easy to click. */
+const crtRoot = document.createElement('div');
+crtRoot.id = 'crt-root';
+document.body.append(crtRoot);
+const crtScreen = new CrtScreen(crtRoot);
+const crtParam = CRT_LEVELS.find((level) => level === params.get('crt'));
 
 type Motion = 'circle' | 'spin' | 'still' | 'drive';
 
@@ -73,7 +81,7 @@ let crates: Crate[] = [];
 let tick = 600;
 let nextId = 1;
 let mode: CameraMode = 'fit';
-let crt = true;
+let crt: CrtLevel = crtParam ?? 'full';
 let stormOn = false;
 let aimsOn = true;
 let paused = false;
@@ -83,6 +91,8 @@ let focusSeat = 0;
 let muted = false;
 let pending: { at: number; run: () => void }[] = [];
 let wantTanks = 8;
+/** Lab clock time the Countdown button's countdown ends, so the view reports the countdown phase until then. */
+let countdownUntil = 0;
 /** Magnifier: copies stage device pixels around a screen point right after each draw, scaled up crisply. */
 let magnify = 0;
 let magnifyAt: { x: number; y: number } | null = null;
@@ -408,7 +418,7 @@ function viewState(): ViewState {
   }
   return {
     tick,
-    phase: 'playing',
+    phase: clock < countdownUntil ? 'countdown' : 'playing',
     maze,
     tanks: tanks.map((t) => t.view),
     projectiles,
@@ -417,7 +427,7 @@ function viewState(): ViewState {
     me: 0,
     focus: focusTank ? { x: focusTank.view.x, y: focusTank.view.y } : null,
     aims,
-    countdown: 0,
+    countdown: Math.max(0, (countdownUntil - clock) * 60),
   };
 }
 
@@ -588,6 +598,14 @@ const eventButtons: [string, () => void][] = [
   ['Kill me', () => killTank(me())],
   ['Self kill', () => killTank(randomTank(), true)],
   [
+    'Spawn me',
+    () => {
+      const v = me().view;
+      emit({ e: Ev.Spawn, seat: 0, x: v.x, y: v.y, a: v.a });
+      v.protectUntil = tick + 120;
+    },
+  ],
+  [
     'Spawn',
     () => {
       const t = randomTank();
@@ -699,7 +717,7 @@ const banners: [string, string][] = [
   ['GO!', '#5dff6a'],
   ['DOUBLE KILL', '#ff9a3d'],
   ['TRIPLE KILL', '#ff4d4d'],
-  ['RAMPAGE', '#d66bff'],
+  ['RAMPAGE', '#ff6bd6'],
   ['YOU DIED', '#ff4d4d'],
   ['OVERTIME', '#ff7a2a'],
 ];
@@ -731,6 +749,12 @@ function section(title: string): HTMLDivElement {
   return div;
 }
 
+function setCrt(level: CrtLevel): void {
+  crt = level;
+  renderer.setCrt(level);
+  crtScreen.setLevel(level);
+}
+
 const statsEl = document.createElement('div');
 function buildPanel(): void {
   const head = document.createElement('div');
@@ -748,9 +772,9 @@ function buildPanel(): void {
     mode = v ? 'follow' : 'fit';
     renderer.setCamera(mode);
   }, view);
-  toggle('CRT', () => crt, (v) => {
-    crt = v;
-    renderer.setCrt(v);
+  const crtButton = button(`CRT: ${crt}`, () => {
+    setCrt(CRT_LEVELS[(CRT_LEVELS.indexOf(crt) + 1) % CRT_LEVELS.length] ?? 'full');
+    crtButton.textContent = `CRT: ${crt}`;
   }, view);
   toggle('Storm', () => stormOn, (v) => (stormOn = v), view);
   toggle('Aims', () => aimsOn, (v) => (aimsOn = v), view);
@@ -796,6 +820,7 @@ function buildPanel(): void {
   const ban = section('Banners');
   for (const [text, color] of banners) button(text, () => renderer.banner(text, color), ban);
   button('Countdown', () => {
+    countdownUntil = clock + 3;
     ['3', '2', '1', 'GO!'].forEach((text, i) =>
       later(i, () => {
         renderer.banner(text, text === 'GO!' ? '#5dff6a' : '#ffe14d');
@@ -842,7 +867,7 @@ function drawMagnifier(view: ViewState): void {
 
 /** Sprite sheet pages for pixel inspection at 4 CSS px per sprite pixel. */
 const sheet = document.createElement('canvas');
-sheet.style.cssText = 'position:fixed;left:0;top:0;display:none;image-rendering:pixelated;background:#14121f;';
+sheet.style.cssText = 'position:fixed;left:0;top:0;display:none;image-rendering:pixelated;background:#1a1a1a;';
 document.body.append(sheet);
 let sheetPage = -1;
 const sheetSprites = new SpriteBank();
@@ -863,7 +888,7 @@ function showSheet(page: number): void {
   sheet.style.display = 'block';
   const ctx = sheet.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = '#1c1930';
+  ctx.fillStyle = '#2a2a2a';
   ctx.fillRect(0, 0, sheet.width, sheet.height);
   const tank = (color: string, variant: number, rot: number, x: number, y: number) => {
     ctx.globalAlpha = 0.42;
@@ -1069,9 +1094,11 @@ window.lab = {
   sheet: showSheet,
   crates: () => crates,
   projectiles: () => projectiles,
+  crt: setCrt,
 };
 
 reset(14, 9, wantTanks, 40);
+setCrt(crt);
 buildPanel();
 applyViewport();
 new ResizeObserver(applyViewport).observe(stage);

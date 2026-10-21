@@ -31,6 +31,28 @@ export interface Award {
   text: string;
 }
 
+/** One stats board row. Name, colour and team are copied in so rows survive the player leaving. */
+export interface PlayerStats {
+  id: string;
+  name: string;
+  /** PALETTE index. */
+  color: number;
+  team: number;
+  bot: BotLevel | null;
+  kills: number;
+  deaths: number;
+  /** Standard and weapon shots fired. */
+  shots: number;
+  /** Shots that damaged an enemy. */
+  hits: number;
+  /** Damage dealt to enemies. */
+  damage: number;
+  /** Most kills in one life. */
+  bestStreak: number;
+  crates: number;
+  bricks: number;
+}
+
 export interface MatchResult {
   draw: boolean;
   /** Winning player ids: one in free-for-all, the team's members in team mode, the tied leaders on a draw. */
@@ -39,7 +61,12 @@ export interface MatchResult {
   team: number;
   /** Player ids, best first. */
   standings: string[];
+  /** Up to five, strongest first. */
   awards: Award[];
+  /** Every seat that played, in standings order. */
+  stats: PlayerStats[];
+  /** Match length in seconds, countdown excluded. */
+  seconds: number;
 }
 
 export interface RoomMsg {
@@ -111,7 +138,8 @@ export interface ErrorMsg {
 export type ServerMsg = WelcomeMsg | RoomMsg | MatchMsg | SnapMsg | ErrorMsg;
 
 export type ClientMsg =
-  | { t: 'hello'; pid: string; name: string }
+  /** color is the player's remembered PALETTE pick, honoured when free. */
+  | { t: 'hello'; pid: string; name: string; color?: number }
   /** Input change (or heartbeat re-send): seq, the tick it applies from, bits, steer byte. */
   | { t: 'in'; s: number; k: number; b: number; d: number }
   | { t: 'settings'; s: Partial<Settings> }
@@ -119,7 +147,9 @@ export type ClientMsg =
   | { t: 'again' }
   | { t: 'addBot'; level: BotLevel }
   | { t: 'removeBot'; id: string }
-  | { t: 'team'; team: number };
+  | { t: 'team'; team: number }
+  /** Lobby only. A colour another human holds is refused; a bot holding it moves to a free colour. */
+  | { t: 'color'; color: number };
 
 export const Ev = {
   Fire: 1,

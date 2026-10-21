@@ -1,8 +1,8 @@
 # Tank Tangle
 
-Retro pixel maze tank battles for 2 to 12 players in the browser, in the spirit of the old Flash game Tank Trouble. Drive around a maze, bank shots off the walls, blow holes in the brickwork and fight over power-up crates.
+Retro pixel maze tank battles for 2 to 12 players in the browser, on a phosphor terminal CRT, in the spirit of the old Flash game Tank Trouble. Drive around a maze, bank shots off the walls, blow holes in the brickwork and fight over power-up crates.
 
-Play at https://tanktangle.bradwindy.workers.dev. Press Create room, send the link to your friends, and the host presses Start. No friends around? The host can add Easy, Normal or Hard bots to fill seats or play solo.
+Play at https://tanktangle.bradwindy.workers.dev. Press Create room, send the link to your friends, and the host presses Start. No friends around? The host can add Easy, Normal, Hard or Expert bots to fill seats or play solo.
 
 ## How to play
 
@@ -11,7 +11,9 @@ Play at https://tanktangle.bradwindy.workers.dev. Press Create room, send the li
 - Tanks have 3 hit points. Bullets bounce off walls, and your own bullets can hit you once they have bounced.
 - Brick walls crack and break under fire, then grow back after about 30 seconds. Steel walls never break.
 - Crates appear away from everyone to draw you out. Driving over one picks it up. A new weapon replaces the one you hold.
-- After you die you respawn 2 seconds later somewhere safe, with a short spawn shield.
+- After you die you respawn 2 seconds later somewhere safe, with a short spawn shield. A big arrow points at your tank and it flashes, at the start and after every respawn.
+- Pick your colour in the lobby. No two players can hold the same one, and your browser remembers your pick.
+- The results screen shows the top 5 awards from a pool of 22 and a stats board with everyone's kills, deaths, accuracy, damage, best streak, crates and bricks.
 
 Two modes:
 
@@ -39,7 +41,7 @@ Killing yourself costs a kill. Killing a teammate costs your team a kill. If som
 
 ### Host settings
 
-Mode, lives or minutes, maze size (it scales with the number of tanks, and the slider makes it smaller or bigger), teams (off, 2, 3 or 4) with a friendly fire switch, power-up frequency, how much of the maze is brick, game speed, and how many times a bullet bounces.
+Mode, lives or minutes, maze size (it scales with the number of tanks, and the slider makes it smaller or bigger), teams (off, 2, 3 or 4) with a friendly fire switch, power-up frequency, how much of the maze is brick, game speed, and how many times a bullet bounces (3 by default).
 
 People who open the link mid-match watch and join the next match. If your connection drops mid-match you have 15 seconds to rejoin your tank.
 
@@ -47,7 +49,7 @@ People who open the link mid-match watch and join the next match. If your connec
 
 The whole game is one Cloudflare Worker.
 
-- `src/client` is the browser game. It draws the arena at pixel-art resolution into a canvas, then scales it up through a WebGL pass that adds bloom, scanlines and screen effects. Every sprite is drawn from code and every sound is synthesised with Web Audio, so there are no image or audio files.
+- `src/client` is the browser game. It draws the arena at pixel-art resolution into a canvas, then scales it up through a WebGL pass that adds bloom, colour fringing, line wobble and phosphor trails. `crt.ts` gives the DOM UI the same glow and fringing and lays scanlines, an aperture mask, grain, flicker, a rolling band and a vignette over everything. The menu cycles the CRT look between Full, Soft (steady) and Off. Every sprite is drawn from code and every sound is synthesised with Web Audio, so there are no image or audio files.
 - `src/worker` holds the Worker, one Durable Object class (`Arena`), the match rules and the bots. Each room code maps to its own Durable Object through `getByName(code)`. It runs the game at 60 Hz and sends snapshots at 30 Hz over WebSockets.
 - `src/shared` holds code both sides run: the maze generator, movement and projectile physics, weapon tables, settings and the message protocol.
 

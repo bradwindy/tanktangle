@@ -70,6 +70,44 @@ describe('seating', () => {
   });
 });
 
+describe('colours', () => {
+  const colorOf = (room: RoomMsg, name: string) => room.players.find((p) => p.name === name)!.color;
+  const seatedUnique = (room: RoomMsg) => {
+    const seated = room.players.filter((p) => p.seat >= 0).map((p) => p.color);
+    return new Set(seated).size === seated.length;
+  };
+
+  it('lets a person take a free colour or a bot one, never another person one, and only in the lobby', () => {
+    const { lobby, join, lastRoom } = makeLobby();
+    join('a', 'b');
+    lobby.addBot('pid-a', 'easy');
+    const bot = lastRoom().players.find((p) => p.bot)!;
+    lobby.pickColor('pid-a', colorOf(lastRoom(), 'b'));
+    expect(colorOf(lastRoom(), 'a')).toBe(0);
+    lobby.pickColor('pid-a', 7);
+    expect(colorOf(lastRoom(), 'a')).toBe(7);
+    lobby.pickColor('pid-b', bot.color);
+    expect(colorOf(lastRoom(), 'b')).toBe(bot.color);
+    expect(colorOf(lastRoom(), bot.name)).not.toBe(bot.color);
+    expect(seatedUnique(lastRoom())).toBe(true);
+    lobby.start('pid-a');
+    lobby.pickColor('pid-a', 9);
+    expect(colorOf(lastRoom(), 'a')).toBe(7);
+  });
+
+  it('gives a newcomer their remembered colour, taking it from a bot but not from a person', () => {
+    const { lobby, join, lastRoom } = makeLobby();
+    join('a');
+    lobby.addBot('pid-a', 'normal');
+    const botColor = lastRoom().players.find((p) => p.bot)!.color;
+    lobby.join('pid-b', 'b', botColor);
+    lobby.join('pid-c', 'c', colorOf(lastRoom(), 'a'));
+    expect(colorOf(lastRoom(), 'b')).toBe(botColor);
+    expect(colorOf(lastRoom(), 'c')).not.toBe(colorOf(lastRoom(), 'a'));
+    expect(seatedUnique(lastRoom())).toBe(true);
+  });
+});
+
 describe('host', () => {
   it('keeps the host through a reconnect grace, then hands over', () => {
     const { lobby, join, lastRoom, clock } = makeLobby();
@@ -268,6 +306,20 @@ describe('restarts and empty rooms', () => {
     const c = makeLobby();
     expect(c.lobby.restore(over, new Set(['pid-a']))).toBe(false);
     expect(c.lobby.roomMsg()).toMatchObject({ phase: 'over', result: { draw: true } });
+  });
+
+  it('moves bots saved before the Expert level up one level, and keeps newer saves as they are', () => {
+    const a = makeLobby();
+    a.join('a');
+    for (const level of ['easy', 'normal', 'hard'] as const) a.lobby.addBot('pid-a', level);
+    const snap = JSON.parse(JSON.stringify(a.lobby.snapshot()));
+    const levels = (l: Lobby) => l.players.filter((p) => p.bot).map((p) => p.bot);
+    const old = makeLobby();
+    old.lobby.restore({ ...snap, botLevels: undefined }, new Set(['pid-a']));
+    expect(levels(old.lobby)).toEqual(['normal', 'hard', 'expert']);
+    const current = makeLobby();
+    current.lobby.restore(snap, new Set(['pid-a']));
+    expect(levels(current.lobby)).toEqual(['easy', 'normal', 'hard']);
   });
 
   it('wipes the room once nobody is connected or coming back', () => {

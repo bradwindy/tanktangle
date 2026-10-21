@@ -31,7 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
   powerups: 2,
   bricks: 2,
   speed: 2,
-  bounces: 6,
+  bounces: 3,
 };
 
 export const LIMITS = {

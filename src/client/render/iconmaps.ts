@@ -6,12 +6,12 @@ export const ICON_SIZE = 10;
 export const ICON_OUTLINED = ICON_SIZE + 2;
 
 export const ICON_COLORS: Readonly<Record<string, string>> = {
-  k: '#1a1726',
+  k: '#161616',
   w: '#ffffff',
-  l: '#d4dbe8',
-  g: '#8d97ab',
-  d: '#525a6e',
-  e: '#343a4c',
+  l: '#d8d8d8',
+  g: '#959595',
+  d: '#575757',
+  e: '#383838',
   r: '#ff4d4d',
   R: '#a8262f',
   o: '#ff9a3d',
@@ -34,7 +34,7 @@ const CHARS = Object.keys(ICON_COLORS);
 /** Index 1 is the outline, colours start at 2. */
 export const ICON_OUTLINE_INDEX = 1;
 export const ICON_KEY: Readonly<Record<string, number>> = Object.fromEntries(CHARS.map((ch, i) => [ch, i + 2]));
-export const ICON_PALETTE: readonly string[] = ['', '#0b0a12', ...CHARS.map((ch) => ICON_COLORS[ch]!)];
+export const ICON_PALETTE: readonly string[] = ['', '#0b0b0b', ...CHARS.map((ch) => ICON_COLORS[ch]!)];
 
 export type IconKind = Weapon | Upgrade | typeof CAUSE_STORM;
 

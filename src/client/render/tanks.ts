@@ -3,13 +3,19 @@ import { DEATH_RAY, SHIELD_WARN_TICKS } from '../../shared/weapons';
 import { TankFlag, Weapon } from '../../shared/types';
 import type { ViewTank } from '../view';
 import type { Effects } from './effects';
-import { ENERGY, FIRE, mix, SMOKE, SPARK } from './palette';
+import { DARK_SMOKE, ENERGY, FIRE, GUNMETAL, mix, SMOKE, SPARK } from './palette';
 import { Kind, type Particles, type Ramp } from './particles';
 import { checker, circlePath, ringPath } from './raster';
 import { CELL, HALF_CELL, rotationIndex, weaponVariant, type SpriteBank } from './sprites';
 import type { World } from './world';
 
 const GHOSTS = 5;
+const RIM = [
+  [-1, 0],
+  [1, 0],
+  [0, -1],
+  [0, 1],
+] as const;
 const GHOST_EVERY = 0.045;
 
 interface TankVis {
@@ -76,11 +82,11 @@ export class TankLayer {
     private fx: Effects,
   ) {
     this.smoke = particles.ramp(SMOKE);
-    this.darkSmoke = particles.ramp(['#4b4861', '#35334a', '#25233a', '#1a1828']);
+    this.darkSmoke = particles.ramp(DARK_SMOKE);
     this.sparks = particles.ramp(SPARK);
     this.fire = particles.ramp(FIRE.slice(1, 7));
     this.energy = particles.ramp(ENERGY);
-    this.steam = particles.ramp(['#e8eef8', '#b8c4d8', '#8a96ad']);
+    this.steam = particles.ramp(['#eeeeee', '#c0c0c0', '#939393']);
   }
 
   reset(): void {
@@ -248,7 +254,8 @@ export class TankLayer {
     if (progress > 0.6) this.fx.shake(0.4 + progress * 0.6);
   }
 
-  draw(ctx: CanvasRenderingContext2D, tanks: readonly ViewTank[], tick: number, now: number): void {
+  /** spawnFlash (0 to 1) flashes your tank white while the spawn cue shows. */
+  draw(ctx: CanvasRenderingContext2D, tanks: readonly ViewTank[], tick: number, now: number, spawnFlash = 0): void {
     const shadows = this.sprites.shadows();
     const weapons = this.sprites.weapons();
     ctx.globalAlpha = 0.42;
@@ -264,7 +271,7 @@ export class TankLayer {
       if (!t.alive) continue;
       const v = this.get(t.seat);
       if (!v) continue;
-      this.drawTank(ctx, t, v, tick, now, weapons);
+      this.drawTank(ctx, t, v, tick, now, weapons, t.isMe ? spawnFlash : 0);
     }
   }
 
@@ -275,6 +282,7 @@ export class TankLayer {
     tick: number,
     now: number,
     weapons: HTMLCanvasElement,
+    spawnFlash: number,
   ): void {
     const rot = rotationIndex(t.a);
     const c = Math.cos(t.a);
@@ -295,19 +303,22 @@ export class TankLayer {
     }
     if (v.ghostCount > 0) {
       const ghost = this.sprites.ghost(mix(t.color, '#ffffff', 0.35));
-      const variant = weaponVariant(t.weapon, 0);
+      const ghostVariant = weaponVariant(t.weapon, 0);
       for (let k = 0; k < v.ghostCount; k++) {
         const i = ((v.ghostHead - 1 - k + GHOSTS * 2) % GHOSTS) * 3;
         ctx.globalAlpha = 0.32 * (1 - k / GHOSTS);
         const gr = rotationIndex(v.ghosts[i + 2]!);
-        ctx.drawImage(ghost, gr * CELL, variant * CELL, CELL, CELL, Math.round(v.ghosts[i]!) - HALF_CELL, Math.round(v.ghosts[i + 1]!) - HALF_CELL, CELL, CELL);
+        ctx.drawImage(ghost, gr * CELL, ghostVariant * CELL, CELL, CELL, Math.round(v.ghosts[i]!) - HALF_CELL, Math.round(v.ghosts[i + 1]!) - HALF_CELL, CELL, CELL);
       }
       ctx.globalAlpha = 1;
     }
-    const protect = (t.flags & TankFlag.Protect) !== 0;
-    if (protect && Math.floor(now * 12) % 2 === 0) ctx.globalAlpha = 0.45;
     const spawnT = (now - v.spawnAt) / 0.4;
     const warping = spawnT >= 0 && spawnT < 1;
+    const variant = weaponVariant(t.weapon, Math.floor(v.spin));
+    const cueing = spawnFlash > 0 && !warping;
+    if (cueing) this.drawSpawnOutline(ctx, rot, variant, dx, dy, spawnFlash);
+    const protect = (t.flags & TankFlag.Protect) !== 0;
+    if (protect && !cueing && Math.floor(now * 12) % 2 === 0) ctx.globalAlpha = 0.45;
     if (warping) {
       ctx.save();
       ctx.beginPath();
@@ -316,7 +327,6 @@ export class TankLayer {
     }
     const flashing = now - v.hitAt < 0.1;
     const frame = ((Math.floor(-v.tread / 1.5) % 3) + 3) % 3;
-    const variant = weaponVariant(t.weapon, Math.floor(v.spin));
     if (flashing) {
       const white = this.sprites.white();
       ctx.drawImage(white, rot * CELL, 0, CELL, CELL, dx, dy, CELL, CELL);
@@ -333,6 +343,10 @@ export class TankLayer {
       ctx.globalAlpha = (1 - spawnT) * 0.9;
       ctx.drawImage(this.sprites.ghost('#ffffff'), rot * CELL, variant * CELL, CELL, CELL, dx, dy, CELL, CELL);
     }
+    if (cueing && Math.floor(now * 8) % 2 === 0) {
+      ctx.globalAlpha = 0.85 * spawnFlash;
+      ctx.drawImage(this.sprites.ghost('#ffffff'), rot * CELL, variant * CELL, CELL, CELL, dx, dy, CELL, CELL);
+    }
     ctx.globalAlpha = 1;
     if (t.flags & TankFlag.RcControl) this.drawAntenna(ctx, x, y, c, s, now);
     if (t.flags & TankFlag.Aimer) {
@@ -343,8 +357,16 @@ export class TankLayer {
     if (t.flags & TankFlag.Shield) this.drawShield(ctx, x, y, t, tick, now);
   }
 
+  /** A white rim one pixel outside the tank, alternating with a white silhouette drawn over it. */
+  private drawSpawnOutline(ctx: CanvasRenderingContext2D, rot: number, variant: number, dx: number, dy: number, strength: number): void {
+    const white = this.sprites.ghost('#ffffff');
+    ctx.globalAlpha = strength;
+    for (const [ox, oy] of RIM) ctx.drawImage(white, rot * CELL, variant * CELL, CELL, CELL, dx + ox, dy + oy, CELL, CELL);
+    ctx.globalAlpha = 1;
+  }
+
   private drawAntenna(ctx: CanvasRenderingContext2D, x: number, y: number, c: number, s: number, now: number): void {
-    ctx.fillStyle = '#aeb9cf';
+    ctx.fillStyle = GUNMETAL.light;
     ctx.beginPath();
     for (let k = 0; k < 5; k++) {
       const along = -3 - k;

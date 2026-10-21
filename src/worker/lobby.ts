@@ -40,7 +40,11 @@ export interface LobbySnapshot {
   result: MatchResult | null;
   overtime: boolean;
   matchId: number;
+  /** 4 since Expert was added. Older snapshots named today's normal, hard and expert bots easy, normal and hard. */
+  botLevels?: number;
 }
+
+const OLD_BOT_LEVEL: Record<string, BotLevel> = { easy: 'normal', normal: 'hard', hard: 'expert' };
 
 /** Score updates during a match go out at most this often (ticks), about 10 a second. */
 const ROOM_EVERY_TICKS = 6;
@@ -80,6 +84,7 @@ export class Lobby {
       result: this.result,
       overtime: this.overtime,
       matchId: this.matchId,
+      botLevels: BOT_LEVELS.length,
     };
   }
 
@@ -91,13 +96,16 @@ export class Lobby {
   restore(snap: LobbySnapshot, livePids: ReadonlySet<string>): boolean {
     const now = this.io.now();
     this.settings = sanitizeSettings(snap.settings);
+    const oldLevels = snap.botLevels === undefined;
     this.players = snap.players.map((p) => {
       const connected = p.bot !== null || livePids.has(p.pid);
-      return { ...p, connected, goneAt: connected ? -1 : now };
+      const bot = p.bot && oldLevels ? (OLD_BOT_LEVEL[p.bot] ?? p.bot) : p.bot;
+      return { ...p, bot, connected, goneAt: connected ? -1 : now };
     });
     this.host = snap.host;
     this.matchId = snap.matchId;
-    this.result = snap.result;
+    // Results saved before the stats board have no stats or match length.
+    this.result = snap.result && { ...snap.result, stats: snap.result.stats ?? [], seconds: snap.result.seconds ?? 0 };
     this.overtime = snap.overtime;
     const cut = snap.phase === 'countdown' || snap.phase === 'playing';
     this.phase = snap.phase === 'over' ? 'over' : 'lobby';
@@ -152,8 +160,11 @@ export class Lobby {
     return !!this.find(pid) || this.players.length < MAX_CONNECTIONS;
   }
 
-  /** A socket said hello: a new player, or someone coming back to their seat. */
-  join(pid: string, name: string): boolean {
+  /**
+   * A socket said hello: a new player, or someone coming back to their seat (who keeps their colour).
+   * color is the newcomer's remembered PALETTE pick, honoured on the same terms as a pick in the lobby.
+   */
+  join(pid: string, name: string, color?: number): boolean {
     let p = this.find(pid);
     if (p) {
       p.connected = true;
@@ -162,7 +173,8 @@ export class Lobby {
       if (this.match && p.seat >= 0) this.match.resetInput(p.seat);
     } else {
       if (this.players.length >= MAX_CONNECTIONS) return false;
-      p = this.addPlayer(pid, name, null);
+      p = this.addPlayer(pid, name, null, color);
+      if (color !== undefined) this.takeColor(p, color);
     }
     this.ensureHost();
     this.io.send(pid, { t: 'welcome', id: p.id });
@@ -236,14 +248,14 @@ export class Lobby {
     this.host = this.players.find((p) => p.connected && !p.bot)?.pid ?? '';
   }
 
-  private addPlayer(pid: string, name: string, bot: BotLevel | null): Player {
+  private addPlayer(pid: string, name: string, bot: BotLevel | null, preferred?: number): Player {
     const used = new Set(this.players.map((q) => q.color));
-    const color = PALETTE.findIndex((_, i) => !used.has(i));
+    const free = PALETTE.findIndex((_, i) => !used.has(i));
     const p: Player = {
       pid,
       id: this.io.newId(),
       name,
-      color: color < 0 ? this.players.length % PALETTE.length : color,
+      color: preferred !== undefined && !used.has(preferred) ? preferred : free < 0 ? this.players.length % PALETTE.length : free,
       seat: -1,
       team: 0,
       bot,
@@ -368,6 +380,27 @@ export class Lobby {
     this.broadcastRoom();
   }
 
+  /**
+   * A person picks a PALETTE colour, in the lobby only. A colour another seated person holds is refused. A seated bot
+   * holding it moves to the lowest free colour. From the bench only colours no seated player holds can be picked.
+   */
+  pickColor(pid: string, color: number): void {
+    const p = this.find(pid);
+    if (p && !p.bot && this.takeColor(p, color)) this.broadcastRoom();
+  }
+
+  private takeColor(p: Player, color: number): boolean {
+    if (this.phase !== 'lobby' || p.color === color) return false;
+    const holder = this.players.find((q) => q !== p && q.seat >= 0 && q.color === color);
+    if (holder && (!holder.bot || p.seat < 0)) return false;
+    p.color = color;
+    if (holder) {
+      const used = new Set(this.players.filter((q) => q.seat >= 0 && q !== holder).map((q) => q.color));
+      holder.color = PALETTE.findIndex((_, i) => !used.has(i));
+    }
+    return true;
+  }
+
   addBot(pid: string, level: unknown): void {
     if (pid !== this.host || this.phase !== 'lobby' || !BOT_LEVELS.includes(level as BotLevel)) return;
     if (this.players.filter((p) => p.seat >= 0).length >= MAX_SEATS || this.players.length >= MAX_CONNECTIONS) return;
@@ -401,7 +434,7 @@ export class Lobby {
     const seats = this.players
       .filter((p) => p.seat >= 0)
       .sort((a, b) => a.seat - b.seat)
-      .map((p) => ({ seat: p.seat, team: p.team, id: p.id, bot: p.bot }));
+      .map((p) => ({ seat: p.seat, team: p.team, id: p.id, bot: p.bot, name: p.name, color: p.color }));
     this.matchId++;
     this.match = new Match({
       id: this.matchId,

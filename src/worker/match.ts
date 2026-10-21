@@ -36,6 +36,7 @@ import {
   type InputAck,
   type MatchMsg,
   type MatchResult,
+  type PlayerStats,
   type SnapMsg,
 } from '../shared/protocol';
 import { randRange, type Rng } from '../shared/rng';
@@ -110,6 +111,10 @@ export interface MatchSeat {
   /** Public player id, used in the result. */
   id: string;
   bot: BotLevel | null;
+  /** Copied into the stats board so rows survive the player leaving. */
+  name: string;
+  /** PALETTE index. */
+  color: number;
 }
 
 export interface MatchOptions {
@@ -156,6 +161,13 @@ export interface Seat {
   nextRoundAt: number;
   /** Id of this tank's live frag bomb, 0 for none. */
   fragId: number;
+  /** Enemy kills this life. */
+  streak: number;
+  lastKillAt: number;
+  /** Kills in the current run of quick kills. */
+  run: number;
+  /** Seat of the enemy that last killed this one, -1 for none or once avenged. */
+  lastKiller: number;
 }
 
 interface Blast {
@@ -169,6 +181,10 @@ interface Blast {
 }
 
 const NO_SHOT = -1_000_000;
+/** Kills this close together make a multi-kill. */
+const MULTI_KILL_TICKS = TICK_HZ / 2;
+const EXPLOSIVE_CAUSES: ReadonlySet<number> = new Set([Weapon.Frag, Weapon.Mines, Weapon.Homing, Weapon.Rc]);
+const BEAM_CAUSES: ReadonlySet<number> = new Set([Weapon.Laser, Weapon.DeathRay]);
 const FIRST_CRATE_TICKS = 2 * TICK_HZ;
 const REGROW_RETRY_TICKS = TICK_HZ;
 const MAX_MARGIN = 999;
@@ -210,6 +226,7 @@ export class Match implements BotWorld {
   version = 0;
 
   private readonly rng: Rng;
+  private readonly roster: readonly MatchSeat[];
   private readonly speed: number;
   private readonly crateCap: number;
   private nextCrateAt: number;
@@ -224,11 +241,13 @@ export class Match implements BotWorld {
   /** Broken bricks by wall id, with the tick they try to regrow. */
   private broken = new Map<number, number>();
   private hits: WallHit[] = [];
+  private firstBlood = false;
 
   constructor(opts: MatchOptions) {
     this.id = opts.id;
     this.settings = opts.settings;
     this.rng = opts.rng;
+    this.roster = opts.seats;
     this.speed = GAME_SPEEDS[opts.settings.speed] ?? 1;
     const n = opts.seats.length;
     const lives = opts.settings.mode === 'lives';
@@ -290,6 +309,10 @@ export class Match implements BotWorld {
         spinReadyAt: 0,
         nextRoundAt: 0,
         fragId: 0,
+        streak: 0,
+        lastKillAt: NO_SHOT,
+        run: 0,
+        lastKiller: -1,
       };
     });
     this.tanks = this.seats.map((s) => s.tank);
@@ -339,6 +362,7 @@ export class Match implements BotWorld {
     t.bits = 0;
     if (t.rc) this.removeById(t.rc);
     s.respawnAt = 0;
+    s.score.left = true;
     if (!s.score.out) {
       s.score.out = true;
       s.score.outTick = this.k;
@@ -374,7 +398,7 @@ export class Match implements BotWorld {
     if (k >= this.playAt) {
       if (k === this.stormAt) this.emit({ e: Ev.Storm });
       for (const s of this.seats) this.updateTank(s);
-      for (const t of this.tanks) if (t.alive) moveTank(t, this.maze, k, this.speed);
+      for (const s of this.seats) if (s.tank.alive) this.drive(s);
       separateTanks(this.tanks, this.maze);
       this.pickUpCrates();
       this.stepProjectiles();
@@ -386,6 +410,14 @@ export class Match implements BotWorld {
     }
     for (const s of this.seats) s.prevBits = s.tank.bits;
     return this.over || k % SNAP_EVERY === 0 ? this.snapshot() : null;
+  }
+
+  private drive(s: Seat): void {
+    const t = s.tank;
+    const x = t.x;
+    const y = t.y;
+    moveTank(t, this.maze, this.k, this.speed);
+    s.score.distance += Math.hypot(t.x - x, t.y - y);
   }
 
   snapshot(): SnapMsg {
@@ -629,7 +661,7 @@ export class Match implements BotWorld {
       if (id >= 0) this.chipBrick(id, LASER.brick, t.seat);
       else {
         const m = mirrorTanks[-id - 1];
-        if (m) this.emit({ e: Ev.Block, seat: m.seat, x: pts[(j + 1) * 2]!, y: pts[(j + 1) * 2 + 1]! });
+        if (m) this.shieldBlock(m.seat, t.seat, pts[(j + 1) * 2]!, pts[(j + 1) * 2 + 1]!);
       }
     }
     this.emit({ e: Ev.Beam, seat: t.seat, weapon: Weapon.Laser, pts });
@@ -673,7 +705,7 @@ export class Match implements BotWorld {
       const vt = v.tank;
       if (!vt.alive || vt.seat === t.seat || vt.protectUntil > k || this.ffBlocked(t.team, t.seat, vt)) continue;
       if (!this.nearPath(vt, pts, DEATH_RAY.width)) continue;
-      if (vt.shieldUntil > k) this.emit({ e: Ev.Block, seat: vt.seat, x: vt.x, y: vt.y });
+      if (vt.shieldUntil > k) this.shieldBlock(vt.seat, t.seat, vt.x, vt.y);
       else this.applyDamage(v, DEATH_RAY.damage, t.seat, Weapon.DeathRay, shot);
     }
   }
@@ -707,6 +739,7 @@ export class Match implements BotWorld {
     t.protectUntil = k + SPAWN_PROTECT_TICKS;
     s.respawnAt = 0;
     s.lifeStart = k;
+    s.streak = 0;
     s.lastShotAt = NO_SHOT;
     this.emit({ e: Ev.Spawn, seat: t.seat, x: t.x, y: t.y, a: t.a });
   }
@@ -720,8 +753,11 @@ export class Match implements BotWorld {
     if (!t.alive || amount <= 0 || t.shieldUntil > k || t.protectUntil > k) return;
     const attacker = by >= 0 ? this.seats[by] : undefined;
     if (attacker && this.ffBlocked(attacker.tank.team, by, t)) return;
-    t.hp = Math.max(0, t.hp - amount);
+    const dealt = Math.min(t.hp, amount);
+    t.hp -= dealt;
+    s.score.damageTaken += dealt;
     if (attacker && this.isEnemy(by, t.seat)) {
+      attacker.score.damage += dealt;
       s.lastDamager = by;
       s.lastDamagedAt = k;
       if (shot && !this.hitShots.has(shot)) {
@@ -729,7 +765,7 @@ export class Match implements BotWorld {
         attacker.score.hits++;
       }
     }
-    if (by === t.seat) s.score.selfDamage += amount;
+    if (by === t.seat) s.score.selfDamage += dealt;
     this.emit({ e: Ev.Hit, seat: t.seat, by, x: t.x, y: t.y, dmg: amount });
     if (t.hp <= 0) this.kill(s, by, cause, ricochet);
   }
@@ -740,14 +776,17 @@ export class Match implements BotWorld {
     let killer = by >= 0 && by !== t.seat ? by : -1;
     if (killer < 0 && s.lastDamager >= 0 && k - s.lastDamagedAt <= KILL_CREDIT_TICKS) killer = s.lastDamager;
     let self = false;
-    const ks = killer >= 0 ? this.seats[killer]?.score : undefined;
-    if (ks) {
+    const ka = killer >= 0 ? this.seats[killer] : undefined;
+    if (ka) {
+      const ks = ka.score;
       if (this.isEnemy(killer, t.seat)) {
         if (s.score.kills > 0 && s.score.kills >= this.topKills()) ks.kingslayer++;
         ks.kills++;
         if (ricochet && killer === by) ks.ricochetKills++;
+        this.creditKill(ka, s, killer === by ? cause : -1);
       } else {
         ks.kills--;
+        ks.teamKills++;
       }
     } else if (by === t.seat) {
       s.score.kills--;
@@ -783,14 +822,49 @@ export class Match implements BotWorld {
     this.version++;
   }
 
+  /** Award bookkeeping for an enemy kill. cause is -1 when the kill was only credited, the killer's shot did not land it. */
+  private creditKill(killer: Seat, victim: Seat, cause: number): void {
+    const sc = killer.score;
+    const k = this.k;
+    killer.streak++;
+    sc.bestStreak = Math.max(sc.bestStreak, killer.streak);
+    sc.killsOn.set(victim.seat, (sc.killsOn.get(victim.seat) ?? 0) + 1);
+    if (killer.lastKiller === victim.seat) {
+      sc.revengeKills++;
+      killer.lastKiller = -1;
+    }
+    victim.lastKiller = killer.seat;
+    if (killer.tank.alive && killer.tank.hp === 1) sc.clutchKills++;
+    killer.run = k - killer.lastKillAt <= MULTI_KILL_TICKS ? killer.run + 1 : 1;
+    killer.lastKillAt = k;
+    if (killer.run === 2) sc.multiKills++;
+    if (EXPLOSIVE_CAUSES.has(cause)) sc.explosiveKills++;
+    if (BEAM_CAUSES.has(cause)) sc.beamKills++;
+    if (!this.firstBlood) {
+      this.firstBlood = true;
+      sc.firstBloodAt = k - this.playAt;
+    }
+  }
+
   private endLife(s: Seat): void {
-    if (s.tank.alive && this.k >= this.playAt) s.score.longestLife = Math.max(s.score.longestLife, this.k - s.lifeStart);
+    if (!s.tank.alive || this.k < this.playAt) return;
+    const life = this.k - s.lifeStart;
+    s.score.longestLife = Math.max(s.score.longestLife, life);
+    s.score.aliveTicks += life;
   }
 
   private topKills(): number {
     let top = 0;
     for (const s of this.seats) top = Math.max(top, s.score.kills);
     return top;
+  }
+
+  /** A shield turned a shot away. Only enemy shots count as deflects. */
+  private shieldBlock(seat: number, by: number, x: number, y: number): void {
+    const s = this.seats[seat];
+    const shooter = this.seats[by];
+    if (s && shooter && by !== seat && !sameTeam(s.tank.team, shooter.tank.team)) s.score.deflects++;
+    this.emit({ e: Ev.Block, seat, x, y });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -946,7 +1020,7 @@ export class Match implements BotWorld {
       if (t.shieldUntil > k) {
         if (deflectOffShield(p, t) && !this.blocked.has(p.id)) {
           this.blocked.add(p.id);
-          this.emit({ e: Ev.Block, seat: t.seat, x: p.x, y: p.y });
+          this.shieldBlock(t.seat, p.owner, p.x, p.y);
         }
         continue;
       }
@@ -1119,6 +1193,7 @@ export class Match implements BotWorld {
     const sideOf = (s: Seat) => (team ? s.tank.team : s.seat + 100);
     const entries = this.seats.map((s) => ({ seat: s.seat, id: s.id, score: s.score }));
     const ranked = rank(this.settings.mode, entries);
+    const seconds = Math.max(0, Math.round((this.k - this.playAt) / TICK_HZ));
     let winners: Seat[];
     if (winner !== null) winners = this.seats.filter((s) => sideOf(s) === winner);
     else if (tied.length > 0) winners = this.seats.filter((s) => tied.includes(sideOf(s)));
@@ -1131,8 +1206,30 @@ export class Match implements BotWorld {
       winners: ranked.filter((e) => winners.some((w) => w.seat === e.seat)).map((e) => e.id),
       team: winner !== null && team ? winner : 0,
       standings: ranked.map((e) => e.id),
-      awards: pickAwards(ranked),
+      awards: pickAwards(ranked, seconds),
+      stats: ranked.map((e) => this.statsRow(e.seat)),
+      seconds,
     };
     this.version++;
+  }
+
+  private statsRow(seat: number): PlayerStats {
+    const { id, name, color, team, bot } = this.roster[seat]!;
+    const sc = this.seats[seat]!.score;
+    return {
+      id,
+      name,
+      color,
+      team,
+      bot,
+      kills: sc.kills,
+      deaths: sc.deaths,
+      shots: sc.shots,
+      hits: sc.hits,
+      damage: sc.damage,
+      bestStreak: sc.bestStreak,
+      crates: sc.crates,
+      bricks: sc.bricks,
+    };
   }
 }
