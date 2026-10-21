@@ -1,7 +1,7 @@
 import { CLOSE, KEEPALIVE_MS, PROTOCOL_VERSION } from '../shared/constants';
 import type { ClientMsg, ServerMsg } from '../shared/protocol';
 
-/** replaced, outdated and full are final: the socket is not reopened. */
+/** replaced, outdated and full are final: the socket is not reopened (see tryAgain for full). */
 export type NetStatus = 'connecting' | 'open' | 'reconnecting' | 'replaced' | 'outdated' | 'full';
 
 const FINAL: Record<number, NetStatus> = {
@@ -25,6 +25,8 @@ export class Net {
   private ws: WebSocket | null = null;
   private attempts = 0;
   private stopped = false;
+  /** This tab got into the room. A full room then only means the socket slots are taken for now: keep trying. */
+  private joined = false;
   private keepalive: ReturnType<typeof setInterval> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
 
@@ -63,6 +65,7 @@ export class Net {
         console.error(JSON.stringify({ event: 'bad_server_message' }));
         return;
       }
+      if (msg.t === 'welcome') this.joined = true;
       this.hooks.message(msg);
     };
     ws.onclose = (ev) => {
@@ -71,7 +74,7 @@ export class Net {
       this.stopKeepalive();
       if (this.stopped) return;
       const final = FINAL[ev.code];
-      if (final) {
+      if (final && !(final === 'full' && this.joined)) {
         this.stopped = true;
         this.setStatus(final);
         return;
@@ -101,6 +104,15 @@ export class Net {
     if (this.retry) clearTimeout(this.retry);
     this.retry = null;
     this.setStatus('reconnecting');
+    this.connect();
+  }
+
+  /** Dials again after a full room turned this tab away. */
+  tryAgain(): void {
+    if (this.status !== 'full') return;
+    this.stopped = false;
+    this.attempts = 0;
+    this.setStatus('connecting');
     this.connect();
   }
 

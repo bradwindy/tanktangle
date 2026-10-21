@@ -517,6 +517,10 @@ input[type='range']:focus-visible {
   text-align: right;
 }
 
+.add-bot {
+  margin-bottom: 12px;
+}
+
 .players {
   list-style: none;
   margin: 0 0 14px;

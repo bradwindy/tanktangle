@@ -4,7 +4,7 @@ import { TILE } from '../../shared/constants';
 
 /** World px shown around the maze in fit mode (outer walls stick out by WALL / 2). */
 export const FIT_MARGIN = 10;
-/** On the follow camera the viewport's short side shows at least this many world px. */
+/** On the follow camera each viewport axis shows at least this many world px (about 5 cells), or the whole maze along it. */
 export const FOLLOW_SPAN = 5 * TILE + 2 * FIT_MARGIN;
 export const FOLLOW_MIN_SCALE = 1.5;
 export const FOLLOW_MAX_SCALE = 3;
@@ -21,9 +21,14 @@ export function fitScale(worldW: number, worldH: number, view: ViewRect): number
   return Math.min(view.w / (worldW + 2 * FIT_MARGIN), view.h / (worldH + 2 * FIT_MARGIN));
 }
 
-export function followScale(view: ViewRect): number {
-  const short = Math.min(view.w, view.h);
-  return Math.min(FOLLOW_MAX_SCALE, Math.max(FOLLOW_MIN_SCALE, short / FOLLOW_SPAN));
+/**
+ * Zooms in as far as FOLLOW_SPAN allows on both axes. A maze smaller than FOLLOW_SPAN along an axis only
+ * needs to fit along it, so a small maze fills that axis (centred by clampAxis) while the other axis follows.
+ */
+export function followScale(worldW: number, worldH: number, view: ViewRect): number {
+  const span = (world: number) => Math.min(FOLLOW_SPAN, world + 2 * FIT_MARGIN);
+  const scale = Math.min(view.w / span(worldW), view.h / span(worldH));
+  return Math.min(FOLLOW_MAX_SCALE, Math.max(FOLLOW_MIN_SCALE, scale));
 }
 
 /**

@@ -81,6 +81,25 @@ describe('bots-only matches', () => {
     expect(m.result!.team).toBeGreaterThan(0);
   }, 60000);
 
+  it('bots of every level hunt down and kill a player who never moves', () => {
+    // Easy seed 2 used to turn back and forth for good between a shot and its route, never moving or firing.
+    for (const level of ['easy', 'normal', 'hard'] as const) {
+      for (let seed = 1; seed <= 30; seed++) {
+        const m = new Match({
+          id: 1,
+          settings: { ...DEFAULT_SETTINGS },
+          seats: [
+            { seat: 0, team: 0, id: 'idle', bot: null },
+            { seat: 1, team: 0, id: 'bot', bot: level },
+          ],
+          rng: mulberry32(seed),
+        });
+        while (m.tanks[0]!.alive && m.k < m.playAt + MINUTE) m.tick();
+        expect(m.tanks[0]!.alive, `${level} bot, seed ${seed}`).toBe(false);
+      }
+    }
+  }, 60000);
+
   it('hard bots beat easy bots by a wide margin', () => {
     let easy = 0;
     let hard = 0;

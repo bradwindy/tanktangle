@@ -176,6 +176,53 @@ describe('Arena Durable Object', () => {
     b.ws.close(CLOSE.left);
   }, 20000);
 
+  it('keeps a match running when the storage write at its start fails', async () => {
+    const host = await connect('FRZAB');
+    host.send({ t: 'hello', pid: 'frozen-host-token-1', name: 'Host' });
+    host.send({ t: 'addBot', level: 'easy' });
+    await host.until(isRoom((m) => m.players.length === 2));
+    await runInDurableObject(env.ARENA.getByName('FRZAB'), (_arena, state) => {
+      state.storage.kv.put = (() => {
+        throw new Error('Exceeded allowed rows written in Durable Objects free tier.');
+      }) as typeof state.storage.kv.put;
+    });
+    host.send({ t: 'start' });
+    await host.until(snapWhere(() => true), 2000);
+    host.ws.close(CLOSE.left);
+  });
+
+  it('closes sockets that never say hello, so they cannot lock a player out of their seat', async () => {
+    const player = await connect('KKABC');
+    player.send({ t: 'hello', pid: 'locked-out-token-01', name: 'P' });
+    const first = await player.until(isWelcome);
+    player.ws.close(1000);
+    const idle: Client[] = [];
+    for (let i = 0; i < 48; i++) idle.push(await connect('KKABC'));
+    const back = await connect('KKABC');
+    back.send({ t: 'hello', pid: 'locked-out-token-01', name: 'P' });
+    expect((await back.until(isWelcome, 2000)).id).toBe(first.id);
+    await Promise.all(idle.slice(0, 40).map((c) => c.closed));
+    back.ws.close(CLOSE.left);
+    for (const c of idle) c.ws.close();
+  });
+
+  it('caps lobby messages per socket, so a stream of team changes cannot flood the room', async () => {
+    const host = await connect('SPMAB');
+    host.send({ t: 'hello', pid: 'spam-host-token-01', name: 'Host' });
+    host.send({ t: 'settings', s: { teams: 2 } });
+    const guest = await connect('SPMAB');
+    guest.send({ t: 'hello', pid: 'spam-guest-token-1', name: 'Guest' });
+    await host.until(isRoom((m) => m.players.length === 2));
+    const before = host.messages.length;
+    for (let i = 0; i < 60; i++) guest.send({ t: 'team', team: (i % 2) + 1 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const rooms = host.messages.slice(before).filter(isRoom()).length;
+    expect(rooms).toBeGreaterThan(0);
+    expect(rooms).toBeLessThanOrEqual(25);
+    host.ws.close(CLOSE.left);
+    guest.ws.close(CLOSE.left);
+  });
+
   it('tells open sockets the match is gone after the object restarts mid-match', async () => {
     const host = await connect('SNPPY');
     host.send({ t: 'hello', pid: 'sleepy-host-token-1', name: 'Host' });

@@ -96,6 +96,7 @@ const handlers: UiHandlers = {
     history.pushState(null, '', '/');
     route();
   },
+  retry: () => session?.retry(),
   settings: (s) => session?.settings(s),
   start: () => session?.start(),
   again: () => session?.again(),
@@ -215,7 +216,20 @@ function syncControls(): void {
 }
 
 let last = performance.now();
+let frameFailed = false;
 function loop(now: number): void {
+  // Scheduled first, so one throw cannot stop the game until a reload.
+  requestAnimationFrame(loop);
+  try {
+    frame(now);
+  } catch (err) {
+    if (frameFailed) return;
+    frameFailed = true;
+    console.error(JSON.stringify({ event: 'frame_failed', error: String(err), stack: err instanceof Error ? err.stack : undefined }));
+  }
+}
+
+function frame(now: number): void {
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
   syncControls();
@@ -239,7 +253,6 @@ function loop(now: number): void {
   }
   sfx.update(view, dt);
   if (follow && model) renderer.drawMinimap(hud.minimap, view);
-  requestAnimationFrame(loop);
 }
 
 addEventListener('pointerdown', (e) => {

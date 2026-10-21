@@ -4,7 +4,10 @@ import { sanitizeName, type ClientMsg, type ServerMsg } from '../shared/protocol
 import { Lobby, type LobbySnapshot } from './lobby';
 
 interface Attachment {
+  /** Empty until the socket says hello. */
   pid: string;
+  /** When the socket opened (ms), until it says hello. */
+  at?: number;
 }
 
 interface Bucket {
@@ -18,6 +21,18 @@ const STALL_MS = 1000;
 const MAX_CATCH_UP = 4;
 /** Open sockets allowed at once, with room for reloads that overlap their old socket. */
 const MAX_SOCKETS = MAX_CONNECTIONS * 2;
+/**
+ * Anything but an input can change the lobby (a broadcast and a storage write each), so it also spends from this much
+ * smaller budget per socket. The burst covers a person clicking through a setting as fast as they can.
+ */
+const CONTROL_PER_SEC = 5;
+const CONTROL_BURST = 20;
+/**
+ * A real client says hello the moment its socket opens. Sockets that have not are closed once they are this old (ms),
+ * or once more than MAX_WAITING are waiting, so idle sockets cannot fill the room.
+ */
+const HELLO_TIMEOUT_MS = 5000;
+const MAX_WAITING = 8;
 
 const log = (event: string, err: unknown) => console.error(JSON.stringify({ event, error: String(err) }));
 
@@ -31,7 +46,10 @@ export class Arena extends DurableObject<Env> {
   private lastTickAt = 0;
   private purgeTimer: ReturnType<typeof setTimeout> | null = null;
   private buckets = new WeakMap<WebSocket, Bucket>();
+  private controlBuckets = new WeakMap<WebSocket, Bucket>();
   private saved = '';
+  /** When the newest socket opened (ms). Strictly increasing, so the newest of the sockets waiting for hello is known. */
+  private openedAt = 0;
   /** A match was cut short by a restart while sockets stayed open. Tell them on the next message. */
   private announceRestore = false;
 
@@ -65,17 +83,37 @@ export class Arena extends DurableObject<Env> {
       return new Response('Expected a WebSocket upgrade', { status: 426 });
     }
     const { 0: client, 1: server } = new WebSocketPair();
-    if (this.ctx.getWebSockets().length >= MAX_SOCKETS) {
+    if (!this.roomForSocket()) {
       server.accept();
       server.close(CLOSE.full, 'Room is full');
       return new Response(null, { status: 101, webSocket: client });
     }
     this.ctx.acceptWebSocket(server);
+    this.openedAt = Math.max(Date.now(), this.openedAt + 1);
+    server.serializeAttachment({ pid: '', at: this.openedAt } satisfies Attachment);
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  /** Whether one more socket fits, after closing sockets that are too old or too many to still be waiting for hello. */
+  private roomForSocket(): boolean {
+    const now = Date.now();
+    const open = this.ctx.getWebSockets().filter((ws) => ws.readyState === WebSocket.OPEN);
+    const waiting = open
+      .map((ws) => ({ ws, att: ws.deserializeAttachment() as Attachment | null }))
+      .filter(({ att }) => !att?.pid)
+      .sort((a, b) => (b.att?.at ?? 0) - (a.att?.at ?? 0));
+    let closed = 0;
+    waiting.forEach(({ ws, att }, i) => {
+      if (i < MAX_WAITING - 1 && now - (att?.at ?? 0) < HELLO_TIMEOUT_MS) return;
+      this.closeQuietly(ws, 1000, 'No hello');
+      closed++;
+    });
+    return open.length - closed < MAX_SOCKETS;
+  }
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== 'string' || message.length > MAX_MESSAGE_BYTES || !this.allow(ws)) return;
+    if (typeof message !== 'string' || message.length > MAX_MESSAGE_BYTES) return;
+    if (!this.allow(this.buckets, ws, RATE_LIMIT_PER_SEC, RATE_LIMIT_PER_SEC)) return;
     let msg: ClientMsg;
     try {
       msg = JSON.parse(message) as ClientMsg;
@@ -83,6 +121,7 @@ export class Arena extends DurableObject<Env> {
       return;
     }
     if (typeof msg !== 'object' || msg === null) return;
+    if (msg.t !== 'in' && !this.allow(this.controlBuckets, ws, CONTROL_PER_SEC, CONTROL_BURST)) return;
     this.watchdog();
     if (this.announceRestore) {
       this.announceRestore = false;
@@ -155,35 +194,35 @@ export class Arena extends DurableObject<Env> {
   }
 
   /** Token bucket per socket. Messages over the rate are dropped. */
-  private allow(ws: WebSocket): boolean {
+  private allow(buckets: WeakMap<WebSocket, Bucket>, ws: WebSocket, perSec: number, burst: number): boolean {
     const now = Date.now();
-    let b = this.buckets.get(ws);
+    let b = buckets.get(ws);
     if (!b) {
-      b = { tokens: RATE_LIMIT_PER_SEC, at: now };
-      this.buckets.set(ws, b);
+      b = { tokens: burst, at: now };
+      buckets.set(ws, b);
     }
-    b.tokens = Math.min(RATE_LIMIT_PER_SEC, b.tokens + ((now - b.at) * RATE_LIMIT_PER_SEC) / 1000);
+    b.tokens = Math.min(burst, b.tokens + ((now - b.at) * perSec) / 1000);
     b.at = now;
     if (b.tokens < 1) return false;
     b.tokens--;
     return true;
   }
 
-  /** Persists lobby-level state when it changed, and starts or stops the timers. Never runs inside a tick. */
+  /**
+   * Starts or stops the timers, then persists lobby-level state when it changed. Never runs inside a tick.
+   * Timers come first and storage failures are only logged, so a full storage quota cannot freeze a match.
+   */
   private async afterChange(): Promise<void> {
     if (this.lobby.players.length === 0) {
       this.stopLoop();
       this.clearPurge();
       this.saved = '';
-      await this.ctx.storage.deleteAll();
+      try {
+        await this.ctx.storage.deleteAll();
+      } catch (err) {
+        log('wipe_failed', err);
+      }
       return;
-    }
-    // Skip no-op writes: ignored messages must not cost a row write each.
-    const snap = this.lobby.snapshot();
-    const json = JSON.stringify(snap);
-    if (json !== this.saved) {
-      this.ctx.storage.kv.put(SNAPSHOT_KEY, snap);
-      this.saved = json;
     }
     if (this.lobby.inMatch) {
       this.clearPurge();
@@ -191,6 +230,16 @@ export class Arena extends DurableObject<Env> {
     } else {
       this.stopLoop();
       this.schedulePurge();
+    }
+    // Skip no-op writes: ignored messages must not cost a row write each. A failed write is retried on the next change.
+    const snap = this.lobby.snapshot();
+    const json = JSON.stringify(snap);
+    if (json === this.saved) return;
+    try {
+      this.ctx.storage.kv.put(SNAPSHOT_KEY, snap);
+      this.saved = json;
+    } catch (err) {
+      log('persist_failed', err);
     }
   }
 

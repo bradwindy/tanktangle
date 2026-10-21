@@ -1,5 +1,5 @@
 /** Bump when client and server messages change shape, so stale tabs are told to reload. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export const TICK_HZ = 60;
 export const TICK_MS = 1000 / TICK_HZ;
@@ -27,7 +27,8 @@ export const RECONNECT_GRACE_MS = 15000;
 export const LOBBY_GRACE_MS = 8000;
 /** Inputs stamped further ahead than this are applied as if stamped now. */
 export const MAX_INPUT_LEAD_TICKS = 60;
-export const MAX_QUEUED_INPUTS = 32;
+/** More than the client's MAX_LEAD (40), so a client at its highest lead sending every tick never loses a queued input. */
+export const MAX_QUEUED_INPUTS = 48;
 
 export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const CODE_LENGTH = 5;

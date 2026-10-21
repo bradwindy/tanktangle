@@ -57,6 +57,9 @@ export interface WallHit {
   /** Contact point on the wall surface. */
   x: number;
   y: number;
+  /** Outward normal at the contact. The projectile's centre was put at x + nx * r, y + ny * r. */
+  nx: number;
+  ny: number;
   /** The projectile's first wall contact ever. Only that one chips a brick. */
   first: boolean;
 }
@@ -412,6 +415,28 @@ export function segmentHitsTank(t: TankState, x0: number, y0: number, x1: number
   return hit >= 0 && hit <= 1 ? hit : null;
 }
 
+const sweepCorners: number[] = [];
+
+/**
+ * Whether a projectile of radius r touched the tank's box anywhere on its move from (x0, y0) to (x1, y1), so a fast
+ * one cannot slip past a corner between tick ends.
+ */
+export function sweepHitsTank(t: TankState, x0: number, y0: number, x1: number, y1: number, r: number): boolean {
+  if (segmentHitsTank(t, x0, y0, x1, y1) !== null || circleHitsTank(t, x0, y0, r) || circleHitsTank(t, x1, y1, r)) return true;
+  // The path misses the box and neither end is close: only a corner can come within r of the path.
+  tankCorners(t, sweepCorners);
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len2 = dx * dx + dy * dy;
+  for (let i = 0; i < 8; i += 2) {
+    const cx = sweepCorners[i]!;
+    const cy = sweepCorners[i + 1]!;
+    const u = len2 > 0 ? clamp(((cx - x0) * dx + (cy - y0) * dy) / len2, 0, 1) : 0;
+    if ((x0 + dx * u - cx) ** 2 + (y0 + dy * u - cy) ** 2 <= r * r) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Tanks
 
@@ -666,7 +691,7 @@ export function stepProjectile(p: ProjState, m: MazeState, tick: number, hits: W
       if (vn >= 0) continue;
       p.vx -= 2 * vn * nx;
       p.vy -= 2 * vn * ny;
-      hits.push({ wall, x: hx, y: hy, first: p.hits === 0 });
+      hits.push({ wall, x: hx, y: hy, nx, ny, first: p.hits === 0 });
       p.hits++;
       if (p.bounces === 0) return 'wall';
       if (p.bounces > 0) p.bounces--;
@@ -860,7 +885,8 @@ function rayCircle(ox: number, oy: number, dx: number, dy: number, c: Circle): n
 }
 
 /**
- * A reflecting ray as a flat x, y polyline starting at the origin, with up to maxReflections bounces and maxLen total.
+ * A reflecting zero-width ray (the laser) as a flat x, y polyline starting at the origin, with up to maxReflections
+ * bounces and maxLen total. A bullet has width and parts ways with it at wall ends: preview one with bulletPath.
  * walls[i] is what was hit at point i + 1: a wall id, or -(k + 1) for mirrors[k] (shield circles).
  * When the path ends on a contact (out of reflections), walls has one entry per point after the origin;
  * when it runs out of length, the last point has no entry.
@@ -911,6 +937,32 @@ export function tracePath(
     oy = hy + ny * RAY_NUDGE;
   }
   return { pts, walls };
+}
+
+const pathHits: WallHit[] = [];
+
+/**
+ * Where a standard bullet fired by t now would fly, as a flat x, y polyline from shotOrigin through the bullet's centre
+ * at each wall bounce. It ends after at most maxLen px of travel, or where the bullet dies on a wall or expires.
+ * It flies a real bullet with stepProjectile, so unlike tracePath's zero-width ray it bounces just off the wall surface
+ * and catches the wall ends the shot will. Tanks and shields are ignored. bounces is settings.bounces,
+ * speed is GAME_SPEEDS[setting].
+ */
+export function bulletPath(m: MazeState, t: TankState, bounces: number, maxLen: number, speed: number): number[] {
+  const o = shotOrigin(t, m);
+  const p = makeProj(Proj.Bullet, 0, t, o.x, o.y, t.a, 0, speed, { bounces });
+  const pts = [o.x, o.y];
+  // The epsilon keeps a whole number of ticks whole despite rounding in the velocity.
+  const ticks = Math.floor(maxLen / (Math.hypot(p.vx, p.vy) * DT) + 1e-9);
+  for (let k = 0; k < ticks; k++) {
+    pathHits.length = 0;
+    const result = stepProjectile(p, m, k, pathHits);
+    for (const h of pathHits) pts.push(h.x + h.nx * p.r, h.y + h.ny * p.r);
+    if (result === 'wall') return pts;
+    if (result === 'expired') break;
+  }
+  pts.push(p.x, p.y);
+  return pts;
 }
 
 /** Heading bent toward the nearest target within DEATH_RAY.seekCone, by at most maxTurn. */

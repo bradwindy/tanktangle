@@ -8,19 +8,24 @@ import {
   OVERTIME_MAX_TICKS,
   RESPAWN_TICKS,
   SPAWN_PROTECT_TICKS,
+  STORM_CLOSE_TICKS,
   STORM_DAMAGE_EVERY,
   STORM_START_TICKS,
+  TANK_HALF_L,
+  TANK_HALF_W,
   TICK_HZ,
   TILE,
 } from '../src/shared/constants';
-import { cellCenter, emptyMaze, vWall } from '../src/shared/grid';
+import { cellCenter, cellOf, emptyMaze, vWall } from '../src/shared/grid';
+import { generateMaze, mazeSizeFor } from '../src/shared/maze';
 import { decodeEvent, Ev, type GameEvent } from '../src/shared/protocol';
 import { mulberry32 } from '../src/shared/rng';
 import { DEFAULT_SETTINGS, type Settings } from '../src/shared/settings';
-import { makeProj } from '../src/shared/sim';
+import { inRect, makeProj, stormRect } from '../src/shared/sim';
 import { CAUSE_STORM, Input, Proj, TankFlag, Upgrade, WallKind, Weapon, type CrateKind, type MazeState } from '../src/shared/types';
-import { DEATH_RAY, FRAG, GATLING, HOMING, MINES, SHOTGUN, UPGRADE_TICKS, WEAPON_AMMO } from '../src/shared/weapons';
+import { DEATH_RAY, FRAG, GATLING, HOMING, MINES, PROJ_STATS, SHOTGUN, UPGRADE_TICKS, WEAPON_AMMO } from '../src/shared/weapons';
 import { Match } from '../src/worker/match';
+import { spawnCell } from '../src/worker/placement';
 
 type Event<E extends number> = Extract<GameEvent, { e: E }>;
 
@@ -201,6 +206,19 @@ describe('lives mode', () => {
     expect(t.hp).toBe(MAX_HP);
     tap(m, 1);
     expect(t.protectUntil).toBeLessThanOrEqual(m.k);
+  });
+
+  it('respawns inside a fully closed storm, never on the enemy holding its middle', () => {
+    const rng = mulberry32(12);
+    const m = generateMaze(rng, { ...mazeSizeFor(12, 0), brickRatio: 0.5 });
+    const safe = stormRect(m, 1000 + STORM_CLOSE_TICKS, 1000)!;
+    const enemy = cellCenter(cellOf((safe.x0 + safe.x1) / 2), cellOf((safe.y0 + safe.y1) / 2));
+    for (let i = 0; i < 50; i++) {
+      const { cx, cy } = spawnCell(m, rng, safe, [enemy], [], [enemy]);
+      const at = cellCenter(cx, cy);
+      expect(inRect(safe, at.x, at.y)).toBe(true);
+      expect(at).not.toEqual(enemy);
+    }
   });
 
   it('closes a storm that hurts tanks outside the safe area', () => {
@@ -399,6 +417,21 @@ describe('weapons', () => {
     return { m, t, target: m.tanks[1]! };
   };
 
+  it('laser: goes through a shielded teammate with friendly fire off, rather than bouncing back at the shooter', () => {
+    const m = makeMatch({ settings: { mode: 'timed', teams: 2, friendlyFire: false }, teams: [1, 1, 2], w: 9, h: 2 });
+    start(m, [
+      [0, 0, RIGHT],
+      [2, 0, RIGHT],
+      [6, 0, LEFT],
+    ]);
+    const [me, mate, enemy] = m.tanks;
+    mate!.shieldUntil = m.k + 600;
+    me!.weapon = Weapon.Laser;
+    me!.ammo = 1;
+    tap(m, 0);
+    expect([me!.hp, mate!.hp, enemy!.alive]).toEqual([MAX_HP, MAX_HP, false]);
+  });
+
   it('laser: hits instantly for 3, freezes the shooter briefly, and returns to the gun', () => {
     const { m, t, target } = duel(Weapon.Laser);
     t.bits = Input.Fire | Input.Fwd;
@@ -543,6 +576,22 @@ describe('weapons', () => {
     const booms = events(tap(m, 0), Ev.Boom);
     expect(booms).toEqual([expect.objectContaining({ kind: Weapon.Rc })]);
     expect(t.rc).toBe(0);
+  });
+
+  it('a fast pellet that only touches a tank corner between tick ends still hits it', () => {
+    const m = makeMatch({ settings: { mode: 'timed' } });
+    start(m, [
+      [0, 0, RIGHT],
+      [4, 1, RIGHT],
+    ]);
+    const t = m.tanks[1]!;
+    // A path 1 px off the tank's corner, diagonally: it touches the box for about 2 px of each 3.7 px tick.
+    const along = (s: number) => ({ x: t.x + TANK_HALF_L + (1 + s) / Math.SQRT2, y: t.y + TANK_HALF_W + (1 - s) / Math.SQRT2 });
+    const from = along(-1.8 - PROJ_STATS[Proj.Pellet].speed / TICK_HZ);
+    m.projectiles.push(makeProj(Proj.Pellet, 900, { seat: 0, team: 0 }, from.x, from.y, -Math.PI / 4, m.k, 1));
+    run(m, 2);
+    expect(t.hp).toBe(MAX_HP - 1);
+    expect(m.projectiles).toEqual([]);
   });
 
   it('shield: no damage, and shots bounce off it', () => {

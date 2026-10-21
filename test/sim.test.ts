@@ -15,6 +15,7 @@ import { emptyMaze, hWall, isSolid, vWall, wallRect } from '../src/shared/grid';
 import { edgeWall, generateMaze, mazeSizeFor, spreadCells, type Dir } from '../src/shared/maze';
 import { mulberry32, type Rng } from '../src/shared/rng';
 import {
+  bulletPath,
   circleHitsTank,
   clearLine,
   deathRayPath,
@@ -24,6 +25,7 @@ import {
   raycast,
   segmentHitsTank,
   separateTanks,
+  shotOrigin,
   steerHoming,
   steerRc,
   stepProjectile,
@@ -226,6 +228,20 @@ describe('tank hit tests', () => {
   });
 });
 
+function distToPolyline(x: number, y: number, pts: readonly number[]): number {
+  let best = Infinity;
+  for (let i = 0; i + 3 < pts.length; i += 2) {
+    const x0 = pts[i]!;
+    const y0 = pts[i + 1]!;
+    const dx = pts[i + 2]! - x0;
+    const dy = pts[i + 3]! - y0;
+    const l2 = dx * dx + dy * dy;
+    const u = l2 > 0 ? Math.min(1, Math.max(0, ((x - x0) * dx + (y - y0) * dy) / l2)) : 0;
+    best = Math.min(best, Math.hypot(x - x0 - dx * u, y - y0 - dy * u));
+  }
+  return best;
+}
+
 function stepUntilHit(p: ProjState, m: MazeState, tick = 0, limit = 600): { hits: WallHit[]; tick: number } {
   const hits: WallHit[] = [];
   while (hits.length === 0 && tick < limit) stepProjectile(p, m, tick++, hits);
@@ -242,6 +258,7 @@ describe('stepProjectile', () => {
     expect(hits).toHaveLength(1);
     expect(hits[0]!.wall).toBe(hWall(4, 2, 0));
     expect(hits[0]!.y).toBeCloseTo(3, 9);
+    expect([hits[0]!.nx, hits[0]!.ny]).toEqual([0, 1]);
     expect(hits[0]!.first).toBe(true);
     expect(p.vx).toBeCloseTo(vx, 9);
     expect(p.vy).toBeCloseTo(PROJ_STATS[Proj.Bullet].speed * Math.sin(Math.PI / 3), 9);
@@ -422,6 +439,49 @@ describe('rays', () => {
     const mirrored = tracePath(m, 24, 72, 0, 1, 10000, [{ x: 100, y: 72, r: 14 }]);
     [24, 72, 86, 72, 3, 72].forEach((v, i) => expect(mirrored.pts[i]).toBeCloseTo(v, 3));
     expect(mirrored.walls).toEqual([-1, vWall(4, 3, 0, 1)]);
+  });
+
+  it('previews a bullet as it flies, catching a wall end that a zero-width ray slips past', () => {
+    const m = emptyMaze(4, 3);
+    // Wall on x = 96 from y = 48 to 96: its rect ends at y = 99, so a shot along y = 100.5 clears it by 1.5 px.
+    m.walls[vWall(4, 3, 2, 1)] = WallKind.Steel;
+    const t = tank({ x: 31, y: 100.5 });
+    const o = shotOrigin(t, m);
+    expect(tracePath(m, o.x, o.y, 0, 6, 640).walls[0]).toBe(vWall(4, 3, 4, 2));
+    const path = bulletPath(m, t, 6, 640, 1);
+    expect(path.slice(0, 2)).toEqual([44, 100.5]);
+    // 2 px a tick from x = 44 puts the r = 2 bullet's centre at (92, 100.5), inside reach of the corner (93, 99).
+    // It bounces off along the corner normal (-1, 1.5) / sqrt(3.25), then down to the bottom wall.
+    expect(path[2]).toBeCloseTo(93 - 2 / Math.sqrt(3.25), 6);
+    expect(path[3]).toBeCloseTo(99 + 3 / Math.sqrt(3.25), 6);
+    expect(path[5]).toBeCloseTo(3 * TILE - 3 - 2, 6);
+  });
+
+  it('bulletPath stays on a real bullet\'s track up to maxLen at every game speed', () => {
+    let worst = 0;
+    let bounces = 0;
+    for (let seed = 1; seed <= 10; seed++) {
+      const rng = mulberry32(seed);
+      const m = generateMaze(rng, { w: 12, h: 8, brickRatio: 0.5 });
+      for (let i = 0; i < 20; i++) {
+        const speed = GAME_SPEEDS[i % GAME_SPEEDS.length]!;
+        const t = tank({ x: (Math.floor(rng() * m.w) + 0.5) * TILE, y: (Math.floor(rng() * m.h) + 0.5) * TILE, a: rng() * TAU });
+        const path = bulletPath(m, t, 6, 640, speed);
+        bounces += path.length / 2 - 2;
+        const o = shotOrigin(t, m);
+        const p = makeProj(Proj.Bullet, 1, t, o.x, o.y, t.a, 0, speed, { bounces: 6 });
+        const step = Math.hypot(p.vx, p.vy) * DT;
+        for (let k = 0; (k + 1) * step <= 640 + 1e-6; k++) {
+          const result = stepProjectile(p, m, k, []);
+          worst = Math.max(worst, distToPolyline(p.x, p.y, path));
+          if (result !== 'alive') break;
+        }
+        expect(Math.hypot(p.x - path.at(-2)!, p.y - path.at(-1)!)).toBeLessThan(1e-6);
+      }
+    }
+    // Contacts put the bullet back out of the wall along the normal, a jog of at most one 2 px substep.
+    expect(worst).toBeLessThan(2);
+    expect(bounces).toBeGreaterThan(200);
   });
 
   it('death ray passes interior walls, stops at the boundary and bends toward targets within limits', () => {

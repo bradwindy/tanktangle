@@ -4,6 +4,7 @@ import type { MazeState, Rect } from '../../shared/types';
 import type { AnyEvent, CameraMode, Renderer, ScreenRect, ViewState } from '../view';
 import { cameraView, clampAxis, damp, FIT_MARGIN, fitScale, followScale, toScreen, type CameraView, type ViewRect } from './camera';
 import { CrateLayer } from './crates';
+import { watchPixelRatio } from './dpr';
 import { Effects } from './effects';
 import { EventFx, type FxContext } from './events';
 import { Minimap } from './minimap';
@@ -92,6 +93,9 @@ class PixelRenderer implements Renderer {
       }).observe(stage);
     }
     globalThis.addEventListener?.('resize', () => {
+      this.sizeDirty = true;
+    });
+    watchPixelRatio(() => {
       this.sizeDirty = true;
     });
     try {
@@ -220,7 +224,7 @@ class PixelRenderer implements Renderer {
       tx = ww / 2;
       ty = wh / 2;
     } else {
-      scale = followScale(vp);
+      scale = followScale(ww, wh, vp);
       const f = view.focus ?? { x: ww / 2, y: wh / 2 };
       const halfW = vp.w / 2 / scale;
       const halfH = vp.h / 2 / scale;

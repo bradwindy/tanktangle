@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Prediction, type PredictOptions } from '../src/client/predict';
-import { TILE } from '../src/shared/constants';
+import { BULLET_MAX_ACTIVE, FIRE_COOLDOWN_TICKS, TANK_HALF_L, TANK_HALF_W, TICK_HZ, TILE } from '../src/shared/constants';
 import { emptyMaze } from '../src/shared/grid';
 import { decodeTank, encodeProj, encodeTank, type InputAck, type SnapMsg } from '../src/shared/protocol';
 import { makeProj, moveTank } from '../src/shared/sim';
 import { Input, Proj, Weapon, type ProjState, type TankState } from '../src/shared/types';
-import { LASER } from '../src/shared/weapons';
+import { DEATH_RAY, LASER, PROJ_STATS } from '../src/shared/weapons';
 
 const NO_ACK: InputAck = { seq: 0, tick: 0, margin: 0 };
 
@@ -103,6 +103,36 @@ describe('prediction replay', () => {
     expect(pred.mine!.x).toBeGreaterThan(start.x + 1);
   });
 
+  it('counts my shots the server has not applied yet against the bullet cap', () => {
+    const pred = predictor();
+    const me = tank(0, TILE / 2, TILE / 2);
+    const flying = Array.from({ length: BULLET_MAX_ACTIVE - 1 }, (_, i) => makeProj(Proj.Bullet, i + 1, me, 3 * TILE, (i + 0.5) * TILE, 0, 0, 1, { bounces: 6 }));
+    pred.applySnapshot(snap(10, [me], [], flying), 10);
+    // Two taps a cooldown apart, both before any snapshot shows the first shot: only the first one can fire.
+    const second = 12 + FIRE_COOLDOWN_TICKS;
+    pred.sent({ seq: 1, k: 11, bits: Input.Fire, steer: 0 });
+    pred.sent({ seq: 2, k: 12, bits: 0, steer: 0 });
+    pred.sent({ seq: 3, k: second, bits: Input.Fire, steer: 0 });
+    for (let k = 11; k <= second + 2; k++) pred.step();
+    expect(pred.events.filter((e) => e.e === 'muzzle')).toHaveLength(1);
+  });
+
+  it('ends my spawn protection on a gatling spin-up or a death ray charge, like the server, and keeps it so on replay', () => {
+    for (const weapon of [Weapon.Gatling, Weapon.DeathRay]) {
+      const pred = predictor();
+      const start = tank(0, 2 * TILE, 2.5 * TILE, 0, { weapon, ammo: 5, protectUntil: 100 });
+      pred.applySnapshot(snap(10, [start]), 10);
+      pred.sent({ seq: 1, k: 11, bits: Input.Fire, steer: 0 });
+      pred.step();
+      expect(pred.mine!.protectUntil).toBe(0);
+      pred.applySnapshot(snap(10, [start]), 12);
+      expect(pred.mine!.protectUntil).toBe(0);
+      expect(pred.mine!.chargeUntil).toBe(weapon === Weapon.DeathRay ? 11 + DEATH_RAY.chargeTicks : 0);
+      // Neither shows a muzzle flash: the rounds and the beam come from the server.
+      expect(pred.events.filter((e) => e.e === 'muzzle')).toHaveLength(0);
+    }
+  });
+
   it('emits bounce events once, even when a snapshot replays the same bounce', () => {
     const pred = predictor({ me: -1 });
     const owner = tank(0, TILE / 2, TILE / 2);
@@ -140,6 +170,18 @@ describe('prediction hide rule', () => {
     const teams = { teamOf: () => 1 };
     expect(shoot({}, { ...teams, friendlyFire: false }).pred.hidden.has(7)).toBe(false);
     expect(shoot({}, { ...teams, friendlyFire: true }).pred.hidden.has(7)).toBe(true);
+  });
+
+  it('hides a fast pellet that only touches a tank corner between tick ends, like the server', () => {
+    const pred = predictor({ me: -1 });
+    const victim = tank(0, 4 * TILE, y);
+    const shooter = tank(1, TILE, y);
+    // A path 1 px off the tank's corner, diagonally: it touches the box for about 2 px of each 3.7 px tick.
+    const along = (s: number) => ({ x: victim.x + TANK_HALF_L + (1 + s) / Math.SQRT2, y: victim.y + TANK_HALF_W + (1 - s) / Math.SQRT2 });
+    const from = along(-1.8 - PROJ_STATS[Proj.Pellet].speed / TICK_HZ);
+    const p = makeProj(Proj.Pellet, 7, shooter, from.x, from.y, -Math.PI / 4, 0, 1);
+    pred.applySnapshot(snap(0, [victim, shooter], [], [p]), 2);
+    expect(pred.hidden.has(7)).toBe(true);
   });
 
   it('bounces off a shield instead of hiding', () => {

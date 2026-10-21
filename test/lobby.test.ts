@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { COUNTDOWN_TICKS, LOBBY_GRACE_MS, MAX_SEATS, RECONNECT_GRACE_MS, TICK_MS } from '../src/shared/constants';
-import type { MatchMsg, RoomMsg, ServerMsg, SnapMsg } from '../src/shared/protocol';
+import type { RoomMsg, ServerMsg, SnapMsg } from '../src/shared/protocol';
 import { Input } from '../src/shared/types';
 import { Lobby } from '../src/worker/lobby';
 
@@ -58,7 +58,9 @@ describe('seating', () => {
     const players = lastRoom().players;
     expect(players.find((p) => p.name === 'late')!.seat).toBeGreaterThanOrEqual(0);
     expect(players.some((p) => p.id === newest.id)).toBe(false);
-    expect(players.filter((p) => p.seat >= 0)).toHaveLength(MAX_SEATS);
+    const seated = players.filter((p) => p.seat >= 0);
+    expect(seated).toHaveLength(MAX_SEATS);
+    expect(new Set(seated.map((p) => p.color)).size).toBe(MAX_SEATS);
   });
 
   it('never broadcasts the secret pid', () => {
@@ -115,6 +117,18 @@ describe('teams', () => {
     expect(lastRoom().players.map((p) => p.team)).toEqual([1, 2, 1, 2]);
     lobby.updateSettings('pid-a', { teams: 0 });
     expect(lastRoom().players.map((p) => p.team)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('sends nothing for a team or settings message that changes nothing, or a start that cannot happen', () => {
+    const { lobby, join, rooms, lastRoom } = makeLobby();
+    join('a', 'b');
+    lobby.updateSettings('pid-a', { teams: 2 });
+    lobby.setTeam('pid-b', 1);
+    const before = rooms().length;
+    lobby.setTeam('pid-b', 1);
+    lobby.updateSettings('pid-a', { teams: 2, lives: lastRoom().settings.lives });
+    lobby.start('pid-a');
+    expect(rooms()).toHaveLength(before);
   });
 
   it('will not start a team game with everyone on one team', () => {
@@ -190,7 +204,9 @@ describe('matches', () => {
     expect(room.phase).toBe('lobby');
     expect(room.players.find((p) => p.name === 'late')!.seat).toBe(0);
     expect(room.players.some((p) => p.id === newestBot.id)).toBe(false);
-    expect(room.players.filter((p) => p.seat >= 0)).toHaveLength(MAX_SEATS);
+    const seated = room.players.filter((p) => p.seat >= 0);
+    expect(seated).toHaveLength(MAX_SEATS);
+    expect(new Set(seated.map((p) => p.color)).size).toBe(MAX_SEATS);
   });
 
   it('drops a seated player whose grace runs out, and flushes the last snapshot before the result', () => {
@@ -274,18 +290,23 @@ describe('restarts and empty rooms', () => {
   });
 });
 
-describe('start', () => {
-  it('drops people who disconnected in the lobby before seating the match', () => {
-    const { lobby, join, sent } = makeLobby();
+describe('start and play again', () => {
+  it('keep someone inside their reconnect grace, who comes back to the same id and seat', () => {
+    const { lobby, join, lastRoom } = makeLobby();
     join('a', 'b', 'c');
+    const b = lastRoom().players[1]!;
     lobby.leave('pid-b', false);
     lobby.start('pid-a');
-    const match = sent.filter((s) => s.msg.t === 'match').at(-1)!.msg as MatchMsg;
-    expect(match.id).toBe(1);
-    expect(lobby.players.map((p) => [p.name, p.seat])).toEqual([
-      ['a', 0],
-      ['c', 1],
-    ]);
-    expect(lobby.match!.seats).toHaveLength(2);
+    expect(lobby.match!.seats).toHaveLength(3);
+    lobby.join('pid-b', 'b');
+    expect(lastRoom().players[1]).toMatchObject({ id: b.id, seat: 1, connected: true });
+
+    lobby.match!.removeSeat(1);
+    lobby.match!.removeSeat(2);
+    for (let i = 0; i <= COUNTDOWN_TICKS && lobby.match; i++) lobby.tick();
+    expect(lastRoom().phase).toBe('over');
+    lobby.leave('pid-b', false);
+    lobby.again('pid-a');
+    expect(lastRoom().players.find((p) => p.name === 'b')).toMatchObject({ id: b.id, connected: false });
   });
 });

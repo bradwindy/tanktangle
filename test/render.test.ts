@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { TILE } from '../src/shared/constants';
 import { CAUSE_STORM, CRATE_KINDS, Weapon } from '../src/shared/types';
 import { cameraView, clampAxis, FIT_MARGIN, fitScale, followScale, toScreen } from '../src/client/render/camera';
+import { watchPixelRatio } from '../src/client/render/dpr';
 import { ICON_KEY, ICON_ROWS, ICON_SIZE, type IconKind } from '../src/client/render/iconmaps';
 import { paintMap, parseMap, rotateSampled, upscale8 } from '../src/client/render/pixels';
 
@@ -14,10 +15,19 @@ describe('camera', () => {
   });
 
   it('follow scale shows at least five cells on the short side, within 1.5 to 3 CSS px per world px', () => {
-    expect(followScale({ x: 0, y: 0, w: 390, h: 844 })).toBe(1.5);
-    expect(followScale({ x: 0, y: 0, w: 2000, h: 1200 })).toBe(3);
-    const tablet = followScale({ x: 0, y: 0, w: 1024, h: 600 });
+    const [w, h] = [17 * TILE, 11 * TILE];
+    expect(followScale(w, h, { x: 0, y: 0, w: 390, h: 844 })).toBe(1.5);
+    expect(followScale(w, h, { x: 0, y: 0, w: 2000, h: 1200 })).toBe(3);
+    const tablet = followScale(w, h, { x: 0, y: 0, w: 1024, h: 600 });
     expect(600 / tablet).toBeGreaterThanOrEqual(5 * TILE);
+  });
+
+  it('follow scale zooms a maze shorter than five cells to fill that axis, keeping five cells on the other', () => {
+    const view = { x: 0, y: 0, w: 844, h: 390 };
+    const s = followScale(6 * TILE, 4 * TILE, view);
+    expect((4 * TILE + 2 * FIT_MARGIN) * s).toBeCloseTo(view.h);
+    expect(view.w / s).toBeGreaterThanOrEqual(5 * TILE);
+    expect(followScale(8 * TILE, 5 * TILE, { x: 0, y: 0, w: 390, h: 844 })).toBe(1.5);
   });
 
   it('clamps the follow window to the maze, and centres a maze smaller than the window', () => {
@@ -32,6 +42,30 @@ describe('camera', () => {
     const cam = cameraView(240, 120, 2, view);
     expect(toScreen(cam, 240, 120)).toEqual({ x: 200, y: 210 });
     expect(toScreen(cam, 250, 120).x).toBe(220);
+  });
+});
+
+describe('watchPixelRatio', () => {
+  it('reports each devicePixelRatio change and re-arms for the new ratio', () => {
+    const armed = new Map<string, () => void>();
+    const source = {
+      devicePixelRatio: 1,
+      matchMedia: (query: string) => ({ addEventListener: (_: string, fn: () => void) => armed.set(query, fn) }) as unknown as MediaQueryList,
+    };
+    let changes = 0;
+    watchPixelRatio(() => changes++, source);
+    // Moving between displays: only the query for the old ratio fires, once.
+    const moveTo = (ratio: number) => {
+      const query = `(resolution: ${source.devicePixelRatio}dppx)`;
+      const fire = armed.get(query);
+      armed.delete(query);
+      source.devicePixelRatio = ratio;
+      fire?.();
+    };
+    moveTo(2);
+    moveTo(1.5);
+    expect(changes).toBe(2);
+    expect([...armed.keys()]).toEqual(['(resolution: 1.5dppx)']);
   });
 });
 

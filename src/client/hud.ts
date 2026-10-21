@@ -101,7 +101,7 @@ export class Hud {
       this.status,
       this.notice,
     );
-    parent.append(this.el);
+    parent.appendChild(this.el);
   }
 
   show(on: boolean): void {
@@ -159,7 +159,7 @@ export class Hud {
       entry.kind === 'note'
         ? h('div', { class: 'line note' }, whoEl(entry.who), h('b', {}, entry.text))
         : this.killLine(entry);
-    this.feed.append(row);
+    this.feed.appendChild(row);
     this.feedItems.push({ el: row, at: now });
     while (this.feedItems.length > FEED_MAX) this.feedItems.shift()!.el.remove();
   }
@@ -232,7 +232,7 @@ export class Hud {
       return;
     }
     const pips = h('div', { class: 'pips', 'aria-label': `${me.hp} of ${MAX_HP} health` });
-    for (let i = 0; i < MAX_HP; i++) pips.append(h('i', { class: i < me.hp ? 'pip on' : 'pip' }));
+    for (let i = 0; i < MAX_HP; i++) pips.appendChild(h('i', { class: i < me.hp ? 'pip on' : 'pip' }));
     const icon = weaponIcon(me.weapon, 24);
     icon.classList.add('icon');
     const weapon = h(

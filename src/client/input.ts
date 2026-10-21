@@ -26,6 +26,8 @@ const STICK_RADIUS = 52;
 const DEADZONE = 12;
 /** Inside this share of the radius the tank only turns to face the stick; further out it drives. */
 const INNER = 0.45;
+/** Once driving, the stick must come back this far inside INNER to stop, so a thumb resting on the line doesn't flicker. */
+const INNER_RELEASE = 0.35;
 
 export const steerByte = (angle: number) => Math.round((angle / TAU) * 256) & 255;
 
@@ -47,6 +49,7 @@ interface Stick {
   baseY: number;
   dx: number;
   dy: number;
+  driving: boolean;
 }
 
 /**
@@ -99,7 +102,10 @@ export class Controls {
       const dist = Math.hypot(s.dx, s.dy);
       if (dist >= DEADZONE) {
         this.steer = steerByte(Math.atan2(s.dy, s.dx));
-        bits = Input.Steer | (dist >= STICK_RADIUS * INNER ? Input.Fwd : 0);
+        s.driving = dist >= STICK_RADIUS * (s.driving ? INNER_RELEASE : INNER);
+        bits = Input.Steer | (s.driving ? Input.Fwd : 0);
+      } else {
+        s.driving = false;
       }
     } else {
       for (const code of this.keys) bits |= KEY_BITS[code]! & ~Input.Fire;
@@ -156,7 +162,7 @@ export class Controls {
       // The pointer was already released. Its pointerup still arrives.
     }
     if (e.clientX < innerWidth / 2 && !this.stick) {
-      this.stick = { id: e.pointerId, baseX: e.clientX, baseY: e.clientY, dx: 0, dy: 0 };
+      this.stick = { id: e.pointerId, baseX: e.clientX, baseY: e.clientY, dx: 0, dy: 0, driving: false };
       this.base?.classList.add('on');
       this.drawStick();
       return;

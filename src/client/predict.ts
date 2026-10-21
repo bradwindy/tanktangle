@@ -1,6 +1,6 @@
 import { BULLET_MAX_ACTIVE, DT, FIRE_COOLDOWN_TICKS, MUZZLE } from '../shared/constants';
 import { decodeProj, decodeTank, type InputAck, type SnapMsg } from '../shared/protocol';
-import { circleHitsTank, deflectOffShield, moveTank, separateTanks, shotOrigin, steerHoming, steerRc, stepProjectile, type WallHit } from '../shared/sim';
+import { deflectOffShield, moveTank, separateTanks, shotOrigin, steerHoming, steerRc, stepProjectile, sweepHitsTank, type WallHit } from '../shared/sim';
 import { Input, Proj, sameTeam, TankFlag, Weapon, type MazeState, type ProjState, type TankState } from '../shared/types';
 import type { Point } from '../shared/vec';
 import { DEATH_RAY, HOMING, LASER, MINES, PROJ_STATS, SHOTGUN } from '../shared/weapons';
@@ -70,7 +70,8 @@ export class Prediction {
   private emittedTick = -1;
   /** Newest input seq whose Fire press has been judged. Replays reuse the verdict instead of judging again. */
   private judgedSeq = 0;
-  private firedSeqs = new Set<number>();
+  /** Presses judged to act, with the weapon they used, until the server acks them. */
+  private firedSeqs = new Map<number, Weapon>();
   private lastShotTick = -Infinity;
   private fragAt = -Infinity;
   private hits: WallHit[] = [];
@@ -152,7 +153,7 @@ export class Prediction {
    */
   private schedule(ack: InputAck, K: number): void {
     this.log = this.log.filter((e) => e.seq > ack.seq);
-    for (const seq of this.firedSeqs) if (seq <= ack.seq) this.firedSeqs.delete(seq);
+    for (const seq of this.firedSeqs.keys()) if (seq <= ack.seq) this.firedSeqs.delete(seq);
     let prev = ack.tick;
     for (const e of this.log) {
       e.at = Math.max(e.k, K + 1, prev + 1);
@@ -215,7 +216,7 @@ export class Prediction {
       this.judgedSeq = seq;
       fires = able && !this.ownsFrag(t, k) && this.canShoot(t, k);
       if (fires) {
-        this.firedSeqs.add(seq);
+        this.firedSeqs.set(seq, t.weapon);
         this.lastShotTick = k;
       }
     } else {
@@ -224,11 +225,14 @@ export class Prediction {
     }
     if (!fires) return;
     const weapon = t.weapon;
+    // Like the server: a shot, a gatling spin-up and a death ray charge all end spawn protection.
+    t.protectUntil = 0;
+    // The gatling spins up and its rounds come from the server.
+    if (weapon === Weapon.Gatling) return;
     if (weapon === Weapon.DeathRay) {
       t.chargeUntil = k + DEATH_RAY.chargeTicks;
       return;
     }
-    t.protectUntil = 0;
     if (weapon === Weapon.Laser) t.frozenUntil = k + LASER.recoilTicks;
     else if (weapon === Weapon.Rc) t.rc = -1;
     else if (weapon === Weapon.Frag) this.fragAt = k;
@@ -248,12 +252,12 @@ export class Prediction {
     const since = k - this.lastShotTick;
     switch (t.weapon) {
       case Weapon.Gun: {
+        // Own bullets are never predicted: count the snapshot's and the shots the server has not applied yet.
         let live = 0;
         for (const p of this.projs) if (p.kind === Proj.Bullet && p.owner === t.seat) live++;
+        for (const weapon of this.firedSeqs.values()) if (weapon === Weapon.Gun) live++;
         return since >= FIRE_COOLDOWN_TICKS && live < BULLET_MAX_ACTIVE;
       }
-      case Weapon.Gatling:
-        return false;
       case Weapon.Shotgun:
         return t.ammo > 0 && since >= SHOTGUN.cooldownTicks;
       case Weapon.Mines:
@@ -276,6 +280,8 @@ export class Prediction {
     for (const p of this.projs) {
       this.steer(p, k);
       hits.length = 0;
+      const x0 = p.x;
+      const y0 = p.y;
       const result = stepProjectile(p, maze, k, hits);
       const shown = live && !this.hidden.has(p.id);
       if (shown) {
@@ -290,7 +296,7 @@ export class Prediction {
         this.hidden.delete(p.id);
         continue;
       }
-      if (!this.hidden.has(p.id)) this.touchTanks(p, k);
+      if (!this.hidden.has(p.id)) this.touchTanks(p, k, x0, y0);
       this.projs[n++] = p;
     }
     this.projs.length = n;
@@ -321,8 +327,11 @@ export class Prediction {
     return out;
   }
 
-  /** Mirrors the server's skip rules: owner unless deadly, friendly-fire-blocked teammates, protected tanks. Shields reflect. */
-  private touchTanks(p: ProjState, k: number): void {
+  /**
+   * Mirrors the server's skip rules: owner unless deadly, friendly-fire-blocked teammates, protected tanks. Shields
+   * reflect. Like the server, a hit is anywhere along the projectile's move this tick, from (x0, y0).
+   */
+  private touchTanks(p: ProjState, k: number, x0: number, y0: number): void {
     if (PROJ_STATS[p.kind].damage === 0) return;
     const friendlyFire = this.opts.friendlyFire;
     for (const t of this.tanks) {
@@ -335,7 +344,7 @@ export class Prediction {
         deflectOffShield(p, t);
         continue;
       }
-      if (circleHitsTank(t, p.x, p.y, p.r)) {
+      if (sweepHitsTank(t, x0, y0, p.x, p.y, p.r)) {
         this.hidden.add(p.id);
         return;
       }

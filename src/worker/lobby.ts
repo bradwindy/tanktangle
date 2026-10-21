@@ -278,6 +278,25 @@ export class Lobby {
       }
     }
     this.fillTeams();
+    this.uniqueColours();
+  }
+
+  /**
+   * Seated players never share a colour. Colours repeat once 12 people and bots are in the room, so a later seat with a
+   * taken colour gets the lowest colour no seated player has. The bench may share.
+   */
+  private uniqueColours(): void {
+    const used = new Set<number>();
+    const clashes: Player[] = [];
+    for (const p of this.players) {
+      if (p.seat < 0) continue;
+      if (used.has(p.color)) clashes.push(p);
+      used.add(p.color);
+    }
+    for (const p of clashes) {
+      p.color = PALETTE.findIndex((_, i) => !used.has(i));
+      used.add(p.color);
+    }
   }
 
   /** Puts every seated player without a valid team on the smallest team. */
@@ -330,6 +349,7 @@ export class Lobby {
     if (pid !== this.host || this.phase !== 'lobby') return;
     const merged = { ...this.settings, ...(typeof partial === 'object' && partial !== null ? partial : {}) };
     const next = sanitizeSettings(merged, this.settings);
+    if ((Object.keys(next) as (keyof Settings)[]).every((key) => next[key] === this.settings[key])) return;
     const teamsChanged = next.teams !== this.settings.teams;
     this.settings = next;
     if (teamsChanged) {
@@ -343,7 +363,7 @@ export class Lobby {
   setTeam(pid: string, team: unknown): void {
     const p = this.find(pid);
     if (!p || this.phase !== 'lobby' || p.seat < 0 || this.settings.teams === 0) return;
-    if (!Number.isInteger(team) || (team as number) < 1 || (team as number) > this.settings.teams) return;
+    if (!Number.isInteger(team) || (team as number) < 1 || (team as number) > this.settings.teams || p.team === team) return;
     p.team = team as number;
     this.broadcastRoom();
   }
@@ -374,18 +394,9 @@ export class Lobby {
     return null;
   }
 
+  /** Seats stay as the lobby shows them: someone inside their reconnect grace keeps their seat and gets a tank. */
   start(pid: string): void {
-    if (pid !== this.host || this.phase !== 'lobby') return;
-    if (this.startProblem()) {
-      this.broadcastRoom();
-      return;
-    }
-    this.players = this.players.filter((p) => p.connected);
-    this.reseat();
-    if (this.startProblem()) {
-      this.broadcastRoom();
-      return;
-    }
+    if (pid !== this.host || this.phase !== 'lobby' || this.startProblem()) return;
     this.resetScores();
     const seats = this.players
       .filter((p) => p.seat >= 0)
@@ -406,10 +417,10 @@ export class Lobby {
     this.io.broadcast(this.match.matchMsg());
   }
 
-  /** Back to the lobby after a match. People on the bench get seats first, ahead of bots. */
+  /** Back to the lobby after a match. People on the bench get seats first, ahead of bots. Anyone still in their grace stays. */
   again(pid: string): void {
     if (pid !== this.host || this.phase !== 'over') return;
-    const people = this.players.filter((p) => p.connected && !p.bot);
+    const people = this.players.filter((p) => !p.bot && (p.connected || p.goneAt >= 0));
     const bots = this.players.filter((p) => p.bot);
     this.players = [...people.filter((p) => p.seat < 0), ...people.filter((p) => p.seat >= 0), ...bots];
     this.phase = 'lobby';

@@ -41,7 +41,6 @@ import {
 import { randRange, type Rng } from '../shared/rng';
 import type { Settings } from '../shared/settings';
 import {
-  circleHitsTank,
   circleTouchesRect,
   circleTouchesWall,
   clearLine,
@@ -57,6 +56,7 @@ import {
   steerRc,
   stepProjectile,
   stormRect,
+  sweepHitsTank,
   tankOverlapsRect,
   tracePath,
   wallsAlongPath,
@@ -426,6 +426,10 @@ export class Match implements BotWorld {
     return id ? this.projectiles.find((p) => p.id === id) : undefined;
   }
 
+  shotAt(seat: number): number {
+    return this.seats[seat]?.lastShotAt ?? NO_SHOT;
+  }
+
   private emit(ev: GameEvent): void {
     this.pending.push(encodeEvent(ev));
   }
@@ -605,7 +609,7 @@ export class Match implements BotWorld {
     const t = s.tank;
     const k = this.k;
     const o = shotOrigin(t, this.maze);
-    const mirrorTanks = this.tanks.filter((m) => m.alive && m.seat !== t.seat && m.shieldUntil > k);
+    const mirrorTanks = this.tanks.filter((m) => m.alive && m.seat !== t.seat && m.shieldUntil > k && !this.ffBlocked(t.team, t.seat, m));
     const mirrors: Circle[] = mirrorTanks.map((m) => ({ x: m.x, y: m.y, r: SHIELD_RADIUS }));
     const { pts, walls } = tracePath(this.maze, o.x, o.y, t.a, LASER.maxReflections, LASER.maxLength, mirrors);
     const shot = this.nextId++;
@@ -862,6 +866,8 @@ export class Match implements BotWorld {
       if (this.dead.has(p.id)) continue;
       if (!this.special(p)) continue;
       this.hits.length = 0;
+      const x0 = p.x;
+      const y0 = p.y;
       const result = stepProjectile(p, this.maze, k, this.hits);
       const brick = PROJ_STATS[p.kind].brick;
       if (brick > 0) for (const h of this.hits) if (h.first) this.chipBrick(h.wall, brick, p.owner);
@@ -871,7 +877,7 @@ export class Match implements BotWorld {
       } else if (result === 'wall') {
         this.remove(p);
       } else if (p.kind !== Proj.Mine) {
-        this.hitTanks(p);
+        this.hitTanks(p, x0, y0);
       }
     }
     this.mineContacts();
@@ -926,10 +932,10 @@ export class Match implements BotWorld {
     return false;
   }
 
-  /** Projectile against tanks: shields reflect, everything else hits the first tank it touches. */
-  private hitTanks(p: ProjState): void {
+  /** Projectile against tanks, along its move from (x0, y0): shields reflect, everything else hits the first tank it touches. */
+  private hitTanks(p: ProjState, x0: number, y0: number): void {
     const k = this.k;
-    const reach = SHIELD_RADIUS + p.r;
+    const reach = SHIELD_RADIUS + p.r + Math.hypot(p.x - x0, p.y - y0);
     for (const s of this.seats) {
       const t = s.tank;
       if (!t.alive) continue;
@@ -944,7 +950,7 @@ export class Match implements BotWorld {
         }
         continue;
       }
-      if (!circleHitsTank(t, p.x, p.y, p.r)) continue;
+      if (!sweepHitsTank(t, x0, y0, p.x, p.y, p.r)) continue;
       const shot = p.kind === Proj.Shrapnel ? 0 : p.id;
       this.applyDamage(s, PROJ_STATS[p.kind].damage, p.owner, this.causeOf(p), shot, p.hits > 0);
       if (isExplosive(p.kind)) this.detonate(p, p.owner, p.team);

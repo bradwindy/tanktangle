@@ -79,14 +79,14 @@ export interface MatchMsg {
 }
 
 /**
- * [seat, x*10, y*10, a*1000, hp, flags, weapon, ammo, bits, steer, ackSeq, ackTick, margin,
+ * [seat, x*100, y*100, a*10000, hp, flags, weapon, ammo, bits, steer, ackSeq, ackTick, margin,
  *  frozenLeft, shieldLeft, speedLeft, aimerLeft, chargeLeft, rc, protectLeft]
  * "Left" fields are ticks remaining from the snapshot tick. ackSeq/ackTick are the last input applied and when.
  * margin = stamped tick - the tick the server was about to run when the input arrived:
  * 0 is just in time, positive is early, negative is late.
  */
 export type TankRow = number[];
-/** [id, kind, x*10, y*10, vx*10, vy*10, owner, bounces, aux, fuseLeft, deadly, age] */
+/** [id, kind, x*100, y*100, vx*100, vy*100, owner, bounces, aux, fuseLeft, deadly, age] */
 export type ProjRow = number[];
 export type EventRow = number[];
 
@@ -161,6 +161,10 @@ export type GameEvent =
 
 const r10 = (v: number) => Math.round(v * 10);
 const r1000 = (v: number) => Math.round(v * 1000);
+// Snapshot rows are finer than events: clients replay from them, and 0.1 px of rounding can flip a wall-end collision.
+const POS = 100;
+const ANGLE = 10000;
+const rPos = (v: number) => Math.round(v * POS);
 const left = (until: number, k: number) => Math.max(0, until - k);
 
 export function encodeEvent(ev: GameEvent): EventRow {
@@ -255,9 +259,9 @@ export function tankFlags(t: TankState, k: number): number {
 export function encodeTank(t: TankState, k: number, ack: InputAck, extraFlags = 0): TankRow {
   return [
     t.seat,
-    r10(t.x),
-    r10(t.y),
-    r1000(t.a),
+    rPos(t.x),
+    rPos(t.y),
+    Math.round(t.a * ANGLE),
     t.hp,
     tankFlags(t, k) | extraFlags,
     t.weapon,
@@ -292,9 +296,9 @@ export function decodeTank(row: TankRow, k: number): DecodedTank {
     tank: {
       seat: n(0),
       team: 0,
-      x: n(1) / 10,
-      y: n(2) / 10,
-      a: n(3) / 1000,
+      x: n(1) / POS,
+      y: n(2) / POS,
+      a: n(3) / ANGLE,
       hp: n(4),
       alive: (flags & TankFlag.Alive) !== 0,
       weapon: n(6) as Weapon,
@@ -318,10 +322,10 @@ export function encodeProj(p: ProjState, k: number): ProjRow {
   return [
     p.id,
     p.kind,
-    r10(p.x),
-    r10(p.y),
-    r10(p.vx),
-    r10(p.vy),
+    rPos(p.x),
+    rPos(p.y),
+    rPos(p.vx),
+    rPos(p.vy),
     p.owner,
     p.bounces,
     p.aux,
@@ -340,10 +344,10 @@ export function decodeProj(row: ProjRow, k: number): ProjState {
   return {
     id: n(0),
     kind,
-    x: n(2) / 10,
-    y: n(3) / 10,
-    vx: n(4) / 10,
-    vy: n(5) / 10,
+    x: n(2) / POS,
+    y: n(3) / POS,
+    vx: n(4) / POS,
+    vy: n(5) / POS,
     owner: n(6),
     team: 0,
     r: stats.r,
@@ -366,13 +370,23 @@ export function normalizeCode(raw: string): string | null {
   return CODE_RE.test(code) ? code : null;
 }
 
+/** Letters and symbols that draw as nothing: Hangul fillers and the blank braille pattern. */
+const BLANK_GLYPHS = /[\u115f\u1160\u3164\uffa0\u2800]/gu;
+/** Anything that draws on its own: not a space, combining mark (variation selectors too), ZWJ or tag character. */
+const VISIBLE = /[^\s\p{M}\u200d\u{e0020}-\u{e007f}]/u;
+
+/** A display name, or '' when nothing visible is left so callers fall back to a default. */
 export function sanitizeName(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   const cleaned = raw
     .normalize('NFC')
     // Strip control and format characters (bidi overrides, zero-width spaces), but keep the joiners emoji need.
-    .replace(/(?![‍\u{e0020}-\u{e007f}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+    .replace(/(?![\u200d\u{e0020}-\u{e007f}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+    .replace(BLANK_GLYPHS, '')
+    // At most two combining marks in a row, so stacked marks cannot spill out of the name tag.
+    .replace(/(\p{M}{2})\p{M}+/gu, '$1')
     .replace(/\s+/g, ' ')
     .trim();
-  return Array.from(cleaned).slice(0, NAME_MAX).join('').trim();
+  const name = Array.from(cleaned).slice(0, NAME_MAX).join('').trim();
+  return VISIBLE.test(name) ? name : '';
 }

@@ -2,7 +2,7 @@ import { BRICK_HP, GAME_SPEEDS, HEARTBEAT_MS, RESPAWN_TICKS, SHIELD_RADIUS, SNAP
 import { decodeMaze } from '../shared/grid';
 import { decodeEvent, Ev, tankFlags, type GameEvent, type MatchMsg, type PublicPlayer, type RoomMsg, type ServerMsg, type SnapMsg } from '../shared/protocol';
 import type { Settings } from '../shared/settings';
-import { shotOrigin, stormRect, tracePath, type Circle } from '../shared/sim';
+import { bulletPath, shotOrigin, stormRect, tracePath, type Circle } from '../shared/sim';
 import { Input, sameTeam, TankFlag, Upgrade, WallKind, Weapon, type BotLevel, type Crate, type MazeState, type TankState } from '../shared/types';
 import { LASER } from '../shared/weapons';
 import { GameClock } from './clock';
@@ -16,13 +16,18 @@ import type { Renderer, Sfx, ViewPhase, ViewProj, ViewState, ViewTank } from './
 
 /** A stalled tab more than this many ticks behind re-simulates from the next snapshot instead of catching up. */
 const MAX_CATCH_UP = 30;
-/** Event effects this many ticks behind the server clock are skipped (the tab was stalled or hidden). */
-const STALE_TICKS = 10;
+/** Event effects that waited this long for a frame are skipped (the tab was stalled or hidden). */
+const STALE_MS = 250;
 /** A local muzzle flash waits this long for the server's matching Fire event. */
 const MUZZLE_WAIT_MS = 500;
-/** Joystick steer changes smaller than this many steps wait, unless STEER_HOLD_TICKS have passed. */
+/**
+ * A joystick steer change of STEER_STEP steps goes out at most every STEER_GAP_TICKS. A smaller one waits
+ * STEER_HOLD_TICKS and must be at least STEER_HOLD_STEPS, so thumb tremor alone sends nothing.
+ */
 const STEER_STEP = 3;
-const STEER_HOLD_TICKS = 6;
+const STEER_GAP_TICKS = 3;
+const STEER_HOLD_STEPS = 2;
+const STEER_HOLD_TICKS = 12;
 const AIMER_LENGTH = 640;
 const STREAK_WINDOW = 4 * TICK_HZ;
 const RAMPAGE = 5;
@@ -83,7 +88,8 @@ export class Session {
   private lastSnap: SnapMsg | null = null;
   /** The match is over and the world shows the server's final snapshot. */
   private frozen = false;
-  private queue: { k: number; ev: GameEvent }[] = [];
+  /** Snapshot events waiting for the next frame, with the snapshot tick and their arrival time. */
+  private queue: { k: number; ev: GameEvent; at: number }[] = [];
   private dirtyWalls = new Set<number>();
   private seats = new Map<number, HudPlayer>();
   private seq = 0;
@@ -227,6 +233,11 @@ export class Session {
     this.deps.sfx.ui(!r.draw && r.winners.includes(me.id) ? 'win' : 'lose');
   }
 
+  /** A full room turned this tab away: try again. */
+  retry(): void {
+    this.net.tryAgain();
+  }
+
   /** Room changes the prediction depends on: my seat, game speed, friendly fire. */
   private configure(): void {
     const m = this.match;
@@ -249,6 +260,7 @@ export class Session {
     const old = this.match;
     if (old && old.id === msg.id && old.maze.w === maze.w && old.maze.h === maze.h) {
       // Back after a reconnect: same match, so keep the maze object (the renderer keeps its decals) and patch it.
+      // Input seqs already restarted when the socket opened, and inputs may have gone out since: no reset here.
       for (let id = 0; id < maze.hp.length; id++) {
         if (old.maze.hp[id] !== maze.hp[id]) {
           old.maze.hp[id] = maze.hp[id]!;
@@ -280,11 +292,11 @@ export class Session {
         pred: new Prediction({ maze, playAt: msg.playAt, speed: 1, friendlyFire: true, me: -1, teamOf: (seat) => this.seats.get(seat)?.player.team ?? 0 }),
       };
       this.configure();
+      this.resetInputs();
       this.deps.hooks.matchStarted();
     }
     this.clock.onSnap(msg.k, now);
     this.lastSnapAt = now;
-    this.resetInputs();
   }
 
   private onSnap(msg: SnapMsg): void {
@@ -297,7 +309,7 @@ export class Session {
       const ev = decodeEvent(row);
       if (!ev) continue;
       this.applyState(m, ev);
-      this.queue.push({ k: msg.k, ev });
+      this.queue.push({ k: msg.k, ev, at: now });
     }
     if (!this.pending || msg.k > this.pending.k) this.pending = msg;
     if (!this.lastSnap || msg.k > this.lastSnap.k) this.lastSnap = msg;
@@ -364,7 +376,8 @@ export class Session {
     let send = this.forceSend || input.bits !== last.bits || now - last.at >= HEARTBEAT_MS;
     if (!send && input.bits & Input.Steer) {
       const steps = steerSteps(input.steer, last.steer);
-      send = steps >= STEER_STEP || (steps > 0 && k - last.k >= STEER_HOLD_TICKS);
+      const since = k - last.k;
+      send = (steps >= STEER_STEP && since >= STEER_GAP_TICKS) || (steps >= STEER_HOLD_STEPS && since >= STEER_HOLD_TICKS);
     }
     if (send) this.send(input, k, now);
   }
@@ -434,6 +447,10 @@ export class Session {
       if (snap) this.rebase(pred, snap, Math.max(target, snap.k));
       return;
     }
+    if (target < pred.tick) {
+      this.stepBack(pred, snap ?? this.lastSnap, target);
+      return;
+    }
     if (target - pred.tick > MAX_CATCH_UP) {
       if (snap) {
         this.rebase(pred, snap, target);
@@ -443,7 +460,8 @@ export class Session {
       pred.jumpTo(target - 1);
     }
     while (pred.tick < target) {
-      this.sampleInput(pred.tick + 1, now);
+      // After a hitch the input read now belongs to the newest tick; the ticks before it keep the input already sent.
+      if (pred.tick + 1 === target) this.sampleInput(target, now);
       pred.step();
     }
     if (snap) {
@@ -451,6 +469,18 @@ export class Session {
       this.rebase(pred, snap, pred.tick);
       this.smoother.rebase(pred, this.alpha);
     }
+  }
+
+  /**
+   * The clock went back (the server's tick loop stalled and it is behind): re-simulate from the newest snapshot to
+   * the new tick instead of freezing until the server catches up. Inputs already sent were stamped against the old
+   * clock, so their acks say nothing about the lead, and new inputs go out from the new tick.
+   */
+  private stepBack(pred: Prediction, snap: SnapMsg | null, target: number): void {
+    this.clock.lead.settle(this.seq);
+    if (snap) this.rebase(pred, snap, Math.max(target, snap.k));
+    this.smoother.clear();
+    this.lastSent.k = Math.min(this.lastSent.k, pred.tick);
   }
 
   private rebase(pred: Prediction, snap: SnapMsg, toTick: number): void {
@@ -526,7 +556,8 @@ export class Session {
 
   private focus(tanks: ViewTank[], mine: ViewTank | undefined): { x: number; y: number } | null {
     let target: ViewTank | undefined;
-    if (mine) target = mine.alive ? mine : undefined;
+    // Out of lives, the tank stays in the snapshots but its player spectates like anyone else.
+    if (mine && !this.me?.out) target = mine.alive ? mine : undefined;
     else target = tanks.find((t) => t.seat === this.spectate && t.alive) ?? this.leader(tanks);
     if (target) this.lastFocus = { x: target.x, y: target.y };
     return this.lastFocus;
@@ -564,13 +595,13 @@ export class Session {
     if (!mine.alive) return [];
     const laser = mine.weapon === Weapon.Laser && mine.ammo > 0;
     if (!laser && mine.aimerUntil <= tick) return [];
-    const o = shotOrigin(mine, m.maze);
     if (laser) {
+      const o = shotOrigin(mine, m.maze);
       const mirrors: Circle[] = [];
       for (const t of tanks) if (t !== mine && t.alive && t.shieldUntil > tick) mirrors.push({ x: t.x, y: t.y, r: SHIELD_RADIUS });
       return [tracePath(m.maze, o.x, o.y, mine.a, LASER.maxReflections, LASER.maxLength, mirrors).pts];
     }
-    return [tracePath(m.maze, o.x, o.y, mine.a, this.room?.settings.bounces ?? 6, AIMER_LENGTH).pts];
+    return [bulletPath(m.maze, mine, this.room?.settings.bounces ?? 6, AIMER_LENGTH, m.pred.opts.speed)];
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -592,7 +623,7 @@ export class Session {
     }
     const queue = this.queue;
     this.queue = [];
-    for (const { k, ev } of queue) this.react(ev, k, this.clock.age(k, now) <= STALE_TICKS, view, now);
+    for (const { k, ev, at } of queue) this.react(ev, k, now - at <= STALE_MS, view, now);
   }
 
   private react(ev: GameEvent, k: number, fresh: boolean, view: ViewState, now: number): void {

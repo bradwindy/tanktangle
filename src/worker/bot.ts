@@ -13,6 +13,7 @@ export const BOT_NAMES = ['Rusty', 'Treads', 'Boomer', 'Sarge', 'Clank', 'Dozer'
 /** What a bot can see of the match. Match implements it. */
 export interface BotWorld {
   readonly k: number;
+  readonly playAt: number;
   readonly stormAt: number;
   readonly maze: MazeState;
   readonly settings: Settings;
@@ -21,6 +22,8 @@ export interface BotWorld {
   readonly projectiles: readonly ProjState[];
   readonly crates: readonly Crate[];
   fragOf(seat: number): ProjState | undefined;
+  /** The tick the seat last fired a shot. */
+  shotAt(seat: number): number;
 }
 
 interface Skill {
@@ -106,9 +109,13 @@ const MIRROR_REACH = 4 * TILE;
 const MIRROR_TARGETS = 2;
 const REFINE_ANGLES = 3;
 const BAD_HEADING_TICKS = 60;
-/** A bot that has turned to aim this long without a shot gives up and moves for a while. */
-const AIM_PATIENCE = 120;
-const MOVE_ON_TICKS = 45;
+/**
+ * A bot that has neither moved PROGRESS_PX nor fired for NO_PROGRESS_TICKS is going nowhere (aiming at a shot it
+ * never takes, or turning back and forth between a shot and its route), so it stops lining up shots and moves on.
+ */
+const NO_PROGRESS_TICKS = 2 * TICK_HZ;
+const PROGRESS_PX = 8;
+const MOVE_ON_TICKS = 1.5 * TICK_HZ;
 /** Heading change per steer byte step. */
 const STEER_STEP = TAU / 256;
 const STRING_PULL = 4;
@@ -225,8 +232,10 @@ export class Bot {
   private badX = 0;
   private badY = 0;
   private hits: WallHit[] = [];
-  /** Ticks spent turning to aim without firing. */
-  private aimTicks = 0;
+  /** Where the bot was when it last moved or fired, and when. */
+  private progressX = 0;
+  private progressY = 0;
+  private progressAt = 0;
   private skipAimUntil = 0;
   private wanderTo = -1;
 
@@ -285,11 +294,16 @@ export class Bot {
     if (!this.firedLast) this.fire = true;
   }
 
-  /** Fire a lined-up shot, after the bot's hesitation. */
-  private shootNow(k: number): void {
-    if (this.rng() >= this.skill.trigger) return;
-    this.press();
-    if (this.fire) this.pauseUntil = k + POST_SHOT_TICKS;
+  /**
+   * Fires a lined-up shot, after the bot's hesitation. Returns the heading to turn to, or to hold while it hesitates,
+   * so it does not wander off a shot it is about to take. null once it fired or when there is no shot.
+   */
+  private take(shot: { now: boolean; aim: number } | null, k: number): number | null {
+    if (shot?.now && this.rng() < this.skill.trigger) {
+      this.press();
+      if (this.fire) this.pauseUntil = k + POST_SHOT_TICKS;
+    }
+    return this.fire ? null : (shot?.aim ?? null);
   }
 
   /** Keep fire down across plans. A hold must start with a fresh edge too. */
@@ -307,6 +321,7 @@ export class Bot {
       this.move = STOP;
       this.firedLast = false;
       this.stuckTicks = 0;
+      this.progressAt = w.k;
       return;
     }
     if (w.k >= this.unstickUntil) this.think(w, t);
@@ -348,11 +363,7 @@ export class Bot {
       if (threat && this.rng() < this.skill.dodge) dodging = this.dodge(w, t, threat);
     }
     const aim = frag ? null : this.shoot(w, t, enemies);
-    this.aimTicks = aim !== null && !this.fire ? this.aimTicks + this.skill.plan : 0;
-    if (this.aimTicks > AIM_PATIENCE) {
-      this.aimTicks = 0;
-      this.skipAimUntil = k + MOVE_ON_TICKS;
-    }
+    if (this.stalled(w, t)) this.skipAimUntil = k + MOVE_ON_TICKS;
     if (dodging) return;
     if (aim !== null && k >= this.skipAimUntil) this.move = { kind: 'aim', a: aim };
     else if (frag || k < this.pauseUntil) this.move = { kind: 'aim', a: this.watch(t, enemies) };
@@ -391,6 +402,21 @@ export class Bot {
     return true;
   }
 
+  /** True once the bot has played NO_PROGRESS_TICKS without moving PROGRESS_PX or firing. Then it starts counting again. */
+  private stalled(w: BotWorld, t: TankState): boolean {
+    const progress =
+      w.k <= w.playAt ||
+      Math.hypot(t.x - this.progressX, t.y - this.progressY) > PROGRESS_PX ||
+      w.shotAt(this.seat) >= this.progressAt;
+    const stalled = !progress && w.k - this.progressAt >= NO_PROGRESS_TICKS;
+    if (progress || stalled) {
+      this.progressX = t.x;
+      this.progressY = t.y;
+      this.progressAt = w.k;
+    }
+    return stalled;
+  }
+
   /** Cells holding mines this bot knows about and must not drive into. */
   private mineCells(w: BotWorld, t: TankState): Uint8Array {
     const n = w.maze.w * w.maze.h;
@@ -420,7 +446,7 @@ export class Bot {
   // -------------------------------------------------------------------------------------------
   // Shooting
 
-  /** Decides whether to fire this plan. Returns the angle to turn to for a better shot, or null to keep moving. */
+  /** Decides whether to fire this plan. Returns the heading to turn to or hold for a shot, or null to keep moving. */
   private shoot(w: BotWorld, t: TankState, enemies: readonly TankState[]): number | null {
     const k = w.k;
     if (k < t.frozenUntil) return null;
@@ -428,28 +454,18 @@ export class Bot {
     if (this.level === 'hard' && t.protectUntil > k + this.skill.plan) return null;
     switch (t.weapon) {
       case Weapon.Gun:
-      case Weapon.Frag: {
-        const shot = this.lineUp(w, t, enemies, t.weapon === Weapon.Gun ? Proj.Bullet : Proj.Frag);
-        if (shot?.now) this.shootNow(k);
-        return shot?.now ? null : (shot?.aim ?? null);
-      }
+      case Weapon.Frag:
+        return this.take(this.lineUp(w, t, enemies, t.weapon === Weapon.Gun ? Proj.Bullet : Proj.Frag), k);
       case Weapon.Gatling: {
         const shot = this.lineUp(w, t, enemies, Proj.Gatling);
-        // Spin up while lining up, so the barrel is turning when the shot opens.
+        // Spin up while lining up, so the barrel is turning when the shot opens, and keep the heading while it fires.
         if (shot && (shot.now || Math.abs(wrapAngle(shot.aim - t.a)) < 0.3)) this.hold();
-        return shot?.now ? null : (shot?.aim ?? null);
+        return shot?.aim ?? null;
       }
-      case Weapon.Shotgun: {
-        const close = enemies.filter((e) => dist(t, e) < SHOTGUN_RANGE);
-        const shot = this.lineUp(w, t, close, Proj.Pellet);
-        if (shot?.now) this.shootNow(k);
-        return shot?.now ? null : (shot?.aim ?? null);
-      }
-      case Weapon.Laser: {
-        const shot = this.lineUp(w, t, enemies, null);
-        if (shot?.now) this.shootNow(k);
-        return shot?.now ? null : (shot?.aim ?? null);
-      }
+      case Weapon.Shotgun:
+        return this.take(this.lineUp(w, t, enemies.filter((e) => dist(t, e) < SHOTGUN_RANGE), Proj.Pellet), k);
+      case Weapon.Laser:
+        return this.take(this.lineUp(w, t, enemies, null), k);
       case Weapon.Homing:
       case Weapon.Rc:
         return this.launchMissile(w, t, enemies);
@@ -513,10 +529,12 @@ export class Bot {
       tryByte(Math.floor(b), penalty);
       if (Math.ceil(b) !== Math.floor(b)) tryByte(Math.ceil(b), penalty);
     };
-    const targets = marks.filter((mk) => mk.enemy).sort((a, b) => dist(o, a) - dist(o, b));
-    for (const mk of targets) if (clearLine(m, o.x, o.y, mk.x, mk.y)) consider(Math.atan2(mk.y - o.y, mk.x - o.x), 0);
+    // Candidates are worked out from the tank centre, not the muzzle: the muzzle sits on the centre's ray at every
+    // heading, so the angles stay right, and the same, while the tank turns toward them.
+    const targets = marks.filter((mk) => mk.enemy).sort((a, b) => dist(t, a) - dist(t, b));
+    for (const mk of targets) if (clearLine(m, t.x, t.y, mk.x, mk.y)) consider(Math.atan2(mk.y - t.y, mk.x - t.x), 0);
     if (depth >= 1) {
-      for (const mk of targets.slice(0, MIRROR_TARGETS)) for (const a of this.mirrorAngles(m, o, mk)) consider(a, 0.3);
+      for (const mk of targets.slice(0, MIRROR_TARGETS)) for (const a of this.mirrorAngles(m, t, mk)) consider(a, 0.3);
     }
     if (depth >= 2 && this.skill.fan > 0 && best.cost === Infinity) {
       const near: { b: number; miss: number }[] = [];

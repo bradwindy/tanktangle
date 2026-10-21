@@ -12,6 +12,8 @@ export interface UiHandlers {
   /** Name entered on an invite link. */
   enter(name: string): void;
   leave(): void;
+  /** Try a full room again. */
+  retry(): void;
   settings(patch: Partial<Settings>): void;
   start(): void;
   again(): void;
@@ -52,14 +54,17 @@ const ON_OFF: Option<boolean>[] = [
 ];
 const POWERUPS = ['Off', 'Rare', 'Normal', 'Lots', 'Frantic'].map((label, value) => ({ value, label }));
 const BRICKS = ['None', 'Few', 'Half', 'Most', 'All'].map((label, value) => ({ value, label }));
-const SPEEDS = ['Slow', 'Easy', 'Normal', 'Fast', 'Turbo'].map((label, value) => ({ value, label }));
+const SPEEDS = ['Slow', 'Calm', 'Normal', 'Fast', 'Turbo'].map((label, value) => ({ value, label }));
 const BOT_LABEL: Record<BotLevel, string> = { easy: 'Easy', normal: 'Normal', hard: 'Hard' };
 
-const FINAL_TEXT: Partial<Record<NetStatus, { title: string; text: string; reload: boolean }>> = {
-  replaced: { title: 'Opened in another tab', text: 'This room is open in another tab or window. Carry on there.', reload: false },
-  outdated: { title: 'New version available - reload', text: 'Tank Tangle was updated while you were here.', reload: true },
-  full: { title: 'Room is full', text: 'This room already has as many people as it can hold.', reload: false },
+const FINAL_TEXT: Partial<Record<NetStatus, { title: string; text: string; action: 'home' | 'reload' | 'retry' }>> = {
+  replaced: { title: 'Opened in another tab', text: 'This room is open in another tab or window. Carry on there.', action: 'home' },
+  outdated: { title: 'New version available - reload', text: 'Tank Tangle was updated while you were here.', action: 'reload' },
+  full: { title: 'Room is full', text: 'This room already has as many people as it can hold.', action: 'retry' },
 };
+
+/** How long a sent setting is shown before the room confirms it, after the last change. */
+const PENDING_MS = 2000;
 
 const coarse = () => matchMedia('(pointer: coarse)').matches;
 
@@ -80,6 +85,12 @@ export class Ui {
   private code = '';
   private panelKey = '';
   private connKey = '';
+  private state: RoomState | null = null;
+  /** Settings sent from here that no room message has confirmed yet. The panel shows them and builds on them. */
+  private pending: Partial<Settings> = {};
+  private pendingTimer = 0;
+  /** A slider is being dragged: rebuilding the panel would drop it. */
+  private holding = false;
 
   constructor(
     private root: HTMLElement,
@@ -87,7 +98,7 @@ export class Ui {
     private prefs: { muted: boolean; crt: boolean },
   ) {
     this.toastEl = h('div', { class: 'toast hidden', role: 'status' });
-    root.append(this.toastEl);
+    root.appendChild(this.toastEl);
   }
 
   /** A lobby or results panel covers the arena. */
@@ -107,6 +118,8 @@ export class Ui {
     this.screen = this.panel = this.conn = null;
     this.panelKey = this.connKey = '';
     this.code = '';
+    this.state = null;
+    this.pending = {};
   }
 
   private nameInput(name: string): HTMLInputElement {
@@ -182,7 +195,7 @@ export class Ui {
       { class: 'screen home' },
       h('div', { class: 'home-inner' }, logo(), h('p', { class: 'tagline' }, 'Maze tank battles for 2 to 12. Share a link, bank your shots, blow up the walls.'), h('div', { class: 'home-cards' }, form, this.howTo())),
     );
-    this.root.append(this.screen);
+    this.root.appendChild(this.screen);
   }
 
   private howTo(): HTMLElement {
@@ -238,7 +251,7 @@ export class Ui {
         ),
       ),
     );
-    this.root.append(this.screen);
+    this.root.appendChild(this.screen);
     nameEl.focus();
   }
 
@@ -247,7 +260,8 @@ export class Ui {
     this.code = code;
     this.panel = h('section', { class: 'panel room-panel hidden' });
     this.conn = h('div', { class: 'conn hidden', role: 'status' });
-    this.root.append(this.panel, this.conn);
+    this.root.appendChild(this.panel);
+    this.root.appendChild(this.conn);
     this.setConn('connecting', true);
   }
 
@@ -279,15 +293,21 @@ export class Ui {
 
   update(state: RoomState): void {
     if (!this.panel) return;
+    this.state = state;
     this.setConn(state.status, !state.room);
     const room = state.room;
     if (!room || FINAL_TEXT[state.status]) {
       this.panel.classList.add('hidden');
       return;
     }
-    const key = JSON.stringify([room.phase, room.host, room.settings, room.players, room.result, state.myId]);
+    this.confirmSettings(room, state);
+    if (this.holding) return;
+    const key = JSON.stringify([room.phase, room.host, room.settings, this.pending, room.players, room.result, state.myId]);
     if (key === this.panelKey) return;
     this.panelKey = key;
+    // The panel is rebuilt: put keyboard focus back on the same control.
+    const active = document.activeElement;
+    const focused = active instanceof HTMLElement && this.panel.contains(active) ? active.dataset.key : undefined;
     if (room.phase === 'lobby') this.renderLobby(room, state.myId);
     else if (room.phase === 'over') this.renderResults(room, state.myId);
     else {
@@ -295,6 +315,44 @@ export class Ui {
       return;
     }
     this.panel.classList.remove('hidden');
+    if (focused) [...this.panel.querySelectorAll<HTMLElement>('[data-key]')].find((el) => el.dataset.key === focused)?.focus({ preventScroll: true });
+  }
+
+  /** Drops pending settings the room now shows, and all of them once this tab cannot be changing settings. */
+  private confirmSettings(room: RoomMsg, state: RoomState): void {
+    if (room.phase !== 'lobby' || room.host !== state.myId || state.status !== 'open') {
+      this.pending = {};
+      return;
+    }
+    for (const key of Object.keys(this.pending) as (keyof Settings)[]) if (room.settings[key] === this.pending[key]) delete this.pending[key];
+  }
+
+  /** The host changed a setting: show it now and send it. */
+  private changeSettings(patch: Partial<Settings>): void {
+    this.pending = { ...this.pending, ...patch };
+    this.on.settings(patch);
+    // The server drops messages over its rate limit without a reply: once changes stop, go back to what it confirmed.
+    clearTimeout(this.pendingTimer);
+    this.pendingTimer = window.setTimeout(() => {
+      this.pending = {};
+      if (this.state) this.update(this.state);
+    }, PENDING_MS);
+    if (this.state) this.update(this.state);
+  }
+
+  /** Holds panel rebuilds until the slider is let go (and its change event has gone out). */
+  private hold(): void {
+    this.holding = true;
+    const release = () => {
+      removeEventListener('pointerup', release);
+      removeEventListener('pointercancel', release);
+      setTimeout(() => {
+        this.holding = false;
+        if (this.state) this.update(this.state);
+      });
+    };
+    addEventListener('pointerup', release);
+    addEventListener('pointercancel', release);
   }
 
   private setConn(status: NetStatus, joining: boolean): void {
@@ -305,15 +363,16 @@ export class Ui {
     const final = FINAL_TEXT[status];
     this.conn.className = final ? 'conn final' : 'conn';
     if (final) {
+      const home = (cls: string) => h('button', { class: cls, type: 'button', onclick: () => this.on.leave() }, 'Back home');
       this.conn.replaceChildren(
         h(
           'div',
           { class: 'panel final-card' },
           h('h2', {}, final.title),
           h('p', {}, final.text),
-          final.reload
-            ? h('button', { class: 'btn primary big', type: 'button', onclick: () => location.reload() }, 'Reload')
-            : h('button', { class: 'btn primary big', type: 'button', onclick: () => this.on.leave() }, 'Back home'),
+          final.action === 'reload' && h('button', { class: 'btn primary big', type: 'button', onclick: () => location.reload() }, 'Reload'),
+          final.action === 'retry' && h('button', { class: 'btn primary big', type: 'button', onclick: () => this.on.retry() }, 'Try again'),
+          home(final.action === 'home' ? 'btn primary big' : 'btn ghost'),
         ),
       );
       return;
@@ -331,33 +390,38 @@ export class Ui {
 
   private renderLobby(room: RoomMsg, myId: string): void {
     const host = room.host === myId;
-    const s = room.settings;
+    const s = { ...room.settings, ...this.pending };
     const teams = s.teams > 0;
     const seated = room.players.filter((p) => p.seat >= 0).sort((a, b) => a.seat - b.seat);
     const bench = room.players.filter((p) => p.seat < 0);
     const me = room.players.find((p) => p.id === myId);
     const hostName = room.players.find((p) => p.id === room.host)?.name ?? 'the host';
-    const set = (patch: Partial<Settings>) => this.on.settings(patch);
+    const set = (patch: Partial<Settings>) => this.changeSettings(patch);
 
     const blocker = this.startBlocker(room);
     const startLabel = host ? (blocker ?? `Start with ${seated.length} tanks`) : `Waiting for ${hostName} to start`;
 
     const left: Child[] = [
       h('h2', {}, `Players ${seated.length}/${MAX_SEATS}`),
-      h('ul', { class: 'players' }, ...seated.map((p) => this.playerRow(p, room, myId))),
+      // Above the list, so the buttons stay put while bots join it.
       host &&
         h(
           'div',
-          { class: 'setting' },
+          { class: 'setting add-bot' },
           h('span', { class: 'label' }, 'Add a bot'),
           h(
             'div',
             { class: 'seg', role: 'group', 'aria-label': 'Add a bot' },
             ...BOT_LEVELS.map((level) =>
-              h('button', { type: 'button', disabled: seated.length >= MAX_SEATS, onclick: () => this.on.addBot(level) }, `+ ${BOT_LABEL[level]}`),
+              h(
+                'button',
+                { type: 'button', 'data-key': `bot:${level}`, disabled: seated.length >= MAX_SEATS, onclick: () => this.on.addBot(level) },
+                `+ ${BOT_LABEL[level]}`,
+              ),
             ),
           ),
         ),
+      h('ul', { class: 'players' }, ...seated.map((p) => this.playerRow(p, room, myId))),
       teams && me && me.seat >= 0 && this.teamPicker(s.teams, me.team),
       bench.length > 0 && h('h3', {}, 'Bench'),
       bench.length > 0 && h('p', { class: 'muted' }, 'Waiting for a free seat. Benched players get seats first next match.'),
@@ -390,14 +454,18 @@ export class Ui {
         'header',
         { class: 'lobby-head' },
         h('div', { class: 'code-box' }, h('span', { class: 'label' }, 'Room'), h('b', { class: 'room-code' }, this.code)),
-        h('button', { class: 'btn primary', type: 'button', onclick: () => void this.share() }, coarse() && 'share' in navigator ? 'Share invite link' : 'Copy invite link'),
+        h(
+          'button',
+          { class: 'btn primary', type: 'button', 'data-key': 'share', onclick: () => void this.share() },
+          coarse() && 'share' in navigator ? 'Share invite link' : 'Copy invite link',
+        ),
       ),
       h('div', { class: 'cols' }, h('div', { class: 'col' }, ...left), h('div', { class: 'col' }, ...right)),
       h(
         'footer',
         { class: 'lobby-foot' },
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => this.on.leave() }, 'Leave'),
-        h('button', { class: 'btn primary big start', type: 'button', disabled: !host || !!blocker, onclick: () => this.on.start() }, startLabel),
+        h('button', { class: 'btn ghost', type: 'button', 'data-key': 'leave', onclick: () => this.on.leave() }, 'Leave'),
+        h('button', { class: 'btn primary big start', type: 'button', 'data-key': 'start', disabled: !host || !!blocker, onclick: () => this.on.start() }, startLabel),
       ),
     );
   }
@@ -429,7 +497,13 @@ export class Ui {
       p.bot && h('span', { class: 'tag bot' }, `Bot ${BOT_LABEL[p.bot]}`),
       teams && p.seat >= 0 && p.team > 0 && h('span', { class: 'tag team', style: { '--c': TEAM_COLORS[p.team]! } }, TEAM_NAMES[p.team]!),
       !p.connected && h('span', { class: 'tag away' }, 'Away'),
-      host && p.bot && h('button', { class: 'remove', type: 'button', title: `Remove ${p.name}`, 'aria-label': `Remove ${p.name}`, onclick: () => this.on.removeBot(p.id) }, 'x'),
+      host &&
+        p.bot &&
+        h(
+          'button',
+          { class: 'remove', type: 'button', 'data-key': `remove:${p.id}`, title: `Remove ${p.name}`, 'aria-label': `Remove ${p.name}`, onclick: () => this.on.removeBot(p.id) },
+          'x',
+        ),
     );
   }
 
@@ -439,7 +513,14 @@ export class Ui {
       buttons.push(
         h(
           'button',
-          { type: 'button', class: t === mine ? 'on' : '', style: { '--c': TEAM_COLORS[t]! }, 'aria-pressed': String(t === mine), onclick: () => this.on.team(t) },
+          {
+            type: 'button',
+            class: t === mine ? 'on' : '',
+            style: { '--c': TEAM_COLORS[t]! },
+            'data-key': `team:${t}`,
+            'aria-pressed': String(t === mine),
+            onclick: () => this.on.team(t),
+          },
           TEAM_NAMES[t]!,
         ),
       );
@@ -461,6 +542,7 @@ export class Ui {
             {
               type: 'button',
               class: o.value === value ? 'on' : '',
+              'data-key': `${label}:${String(o.value)}`,
               disabled: !enabled && o.value !== value,
               'aria-disabled': String(!enabled),
               'aria-pressed': String(o.value === value),
@@ -483,9 +565,9 @@ export class Ui {
       h(
         'div',
         { class: 'stepper' },
-        h('button', { type: 'button', disabled: !enabled || value <= min, 'aria-label': `Less ${label}`, onclick: () => change(value - 1) }, '-'),
+        h('button', { type: 'button', 'data-key': `${label}:-`, disabled: !enabled || value <= min, 'aria-label': `Less ${label}`, onclick: () => change(value - 1) }, '-'),
         h('output', {}, String(value)),
-        h('button', { type: 'button', disabled: !enabled || value >= max, 'aria-label': `More ${label}`, onclick: () => change(value + 1) }, '+'),
+        h('button', { type: 'button', 'data-key': `${label}:+`, disabled: !enabled || value >= max, 'aria-label': `More ${label}`, onclick: () => change(value + 1) }, '+'),
       ),
     );
   }
@@ -499,7 +581,8 @@ export class Ui {
     change: (v: number) => void,
   ): HTMLElement {
     const out = h('output', {}, describe(value));
-    const input = h('input', { type: 'range', min, max, step: 1, value, disabled: !enabled, 'aria-label': label });
+    const input = h('input', { type: 'range', min, max, step: 1, value, disabled: !enabled, 'data-key': label, 'aria-label': label });
+    input.addEventListener('pointerdown', () => this.hold());
     input.addEventListener('input', () => {
       out.textContent = describe(Number(input.value));
     });
@@ -577,9 +660,9 @@ export class Ui {
       h(
         'footer',
         { class: 'lobby-foot' },
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => this.on.leave() }, 'Leave'),
+        h('button', { class: 'btn ghost', type: 'button', 'data-key': 'leave', onclick: () => this.on.leave() }, 'Leave'),
         host
-          ? h('button', { class: 'btn primary big', type: 'button', onclick: () => this.on.again() }, 'Play again')
+          ? h('button', { class: 'btn primary big', type: 'button', 'data-key': 'again', onclick: () => this.on.again() }, 'Play again')
           : h('p', { class: 'muted waiting' }, 'Waiting for the host to start the next round'),
       ),
     );
@@ -626,7 +709,7 @@ export class Ui {
         h('button', { class: 'btn danger', type: 'button', onclick: () => this.on.leave() }, 'Leave room'),
       ),
     );
-    this.root.append(this.menuEl);
+    this.root.appendChild(this.menuEl);
     resume.focus();
   }
 

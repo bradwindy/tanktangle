@@ -30,6 +30,16 @@ export function pathDistanceFrom(m: MazeState, from: readonly Point[]): Int16Arr
   return near;
 }
 
+/** Indices of the cells whose centres are inside the safe area (every cell when there is no storm). */
+function safeCells(m: MazeState, safe: Rect | null): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < m.w * m.h; i++) {
+    const at = cellCenter(i % m.w, Math.floor(i / m.w));
+    if (!safe || inRect(safe, at.x, at.y)) out.push(i);
+  }
+  return out;
+}
+
 /** The heading with the longest clear run from the cell centre, so a tank spawns facing open space. */
 export function openAngle(m: MazeState, cell: Cell): number {
   const at = cellCenter(cell.cx, cell.cy);
@@ -46,8 +56,8 @@ export function openAngle(m: MazeState, cell: Cell): number {
 }
 
 /**
- * A respawn cell: of random candidates inside the safe area, the one farthest by path from the nearest enemy,
- * marked down for projectiles nearby and for a tank already in the cell.
+ * A respawn cell: of random cells inside the safe area (every one once the storm leaves SPAWN_CANDIDATES or fewer),
+ * the one farthest by path from the nearest enemy, marked down for projectiles nearby and for a tank already in the cell.
  */
 export function spawnCell(
   m: MazeState,
@@ -58,14 +68,15 @@ export function spawnCell(
   tanks: readonly Point[],
 ): Cell {
   const near = pathDistanceFrom(m, enemies);
+  const cells = safeCells(m, safe);
+  const candidates =
+    cells.length <= SPAWN_CANDIDATES ? cells : Array.from({ length: SPAWN_CANDIDATES }, () => cells[randInt(rng, cells.length)]!);
   let best: Cell | null = null;
   let bestScore = -Infinity;
-  for (let i = 0; i < SPAWN_CANDIDATES; i++) {
-    const c = randInt(rng, m.w * m.h);
+  for (const c of candidates) {
     const cx = c % m.w;
     const cy = (c - cx) / m.w;
     const at = cellCenter(cx, cy);
-    if (safe && !inRect(safe, at.x, at.y)) continue;
     let score = Math.min(near[c]!, 99);
     for (const p of projectiles) if (Math.hypot(p.x - at.x, p.y - at.y) < SPAWN_PROJ_RADIUS) score -= 3;
     for (const t of tanks) if (cellOf(t.x) === cx && cellOf(t.y) === cy) score -= 4;
@@ -75,7 +86,7 @@ export function spawnCell(
     }
   }
   if (best) return best;
-  // Every candidate was in the storm: take the cell at the middle of the safe area.
+  // No cell centre is inside the safe area: take the cell at its middle.
   const r = safe ?? { x0: 0, y0: 0, x1: m.w * TILE, y1: m.h * TILE };
   return { cx: cellOf((r.x0 + r.x1) / 2), cy: cellOf((r.y0 + r.y1) / 2) };
 }
@@ -87,11 +98,7 @@ export function spawnCell(
 export function crateCell(m: MazeState, rng: Rng, safe: Rect | null, tanks: readonly Point[], crates: readonly Crate[]): Cell | null {
   const near = pathDistanceFrom(m, tanks);
   const taken = new Set(crates.map((c) => c.cy * m.w + c.cx));
-  const free: number[] = [];
-  for (let i = 0; i < m.w * m.h; i++) {
-    const at = cellCenter(i % m.w, Math.floor(i / m.w));
-    if (!taken.has(i) && (!safe || inRect(safe, at.x, at.y))) free.push(i);
-  }
+  const free = safeCells(m, safe).filter((i) => !taken.has(i));
   for (const need of [CRATE_MIN_PATH_CELLS, 2, 0]) {
     const ok = free.filter((i) => near[i]! >= need);
     if (ok.length === 0) continue;

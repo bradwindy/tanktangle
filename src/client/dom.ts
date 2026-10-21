@@ -20,10 +20,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = 
   return el;
 }
 
-export function append(el: Element, children: Child[]): void {
+/** appendChild rather than append: the tests' Workers types redefine Element.append for HTMLRewriter. */
+export function append(el: Node, children: Child[]): void {
   for (const c of children) {
     if (c === null || c === undefined || c === false) continue;
-    el.append(typeof c === 'number' ? String(c) : c);
+    el.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
   }
 }
 
